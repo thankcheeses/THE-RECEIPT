@@ -105,12 +105,17 @@ Sharing goes through one interface (`client/src/lib/sharing/`): components ask f
 
 Every target is either a browser capability or a documented public web intent. **Nothing posts on a user's behalf.** An intent opens the platform's own composer with the text prefilled and the user decides whether to send it. No platform credentials are stored or required.
 
-| Target | What it actually does |
-| --- | --- |
-| Share… | Hands off to the OS share sheet (where `navigator.share` exists) |
-| Copy link | Copies the canonical `/r/:id` URL |
-| X, Bluesky, WhatsApp, Reddit, Facebook | Opens that platform's composer with text prefilled; the user posts |
-| Save receipt image | Downloads the generated card |
+Destinations are grouped by platform, so one platform can offer several — Instagram's story and feed cards are different shapes of the same receipt.
+
+| Platform | Destinations | What it actually does |
+| --- | --- | --- |
+| This device | Share sheet | Hands off to the OS share sheet (where `navigator.share` exists) |
+| Link | Copy link | Copies the canonical `/r/:id` URL |
+| X · Bluesky · Reddit · Facebook | Post / Share | Opens that platform's composer; the user posts |
+| WhatsApp | Send to a chat | `wa.me` opens a chat. WhatsApp Status has no web intent, so it is not offered |
+| Instagram | Story card · Feed card | Saves a 9:16 or 1:1 card |
+| TikTok | Story card | Saves a 9:16 card |
+| Save a card | Link card | Saves the wide card used for link previews |
 
 Instagram and TikTok have **no web intent for composing a post**. Publishing to them requires their Content Publishing / Content Posting APIs, which need a registered app, platform review, an eligible business or creator account, and server-held credentials. Rather than implying one-tap posting, the product offers the receipt card for the user to post themselves.
 
@@ -122,7 +127,17 @@ A public receipt at `/r/:id` is served by the Node app with its own Open Graph a
 
 The tags are read from the database per request, so a receipt created after the last deploy previews correctly. Private receipts are never given metadata: `/r/:id` falls through to the plain application shell and the image endpoint returns 404.
 
-The image is rendered with `satori` + `@resvg/resvg-js` and fonts from `@fontsource`, and cached briefly in memory.
+The image is rendered with `satori` + `@resvg/resvg-js` and fonts from `@fontsource`, and cached in memory per receipt and format.
+
+Cards come in three shapes, requested with `?format=`:
+
+| Format | Size | Used for |
+| --- | --- | --- |
+| `og` (default) | 1200×630 | Link previews |
+| `story` | 1080×1920 | Instagram, TikTok and Snapchat stories |
+| `square` | 1080×1080 | An Instagram feed post |
+
+The layout adapts rather than being cropped: the taller formats give the receipt a larger share of the canvas, set its contents bigger so a full phone screen does not leave it adrift, and add the tagline in the spare room. An unrecognised `format` is rejected rather than quietly served as a link card.
 
 **The GitHub Pages demo does not do this.** Pages serves static files with no server, so it cannot generate per-receipt tags. Its receipts also live in one browser's `localStorage` and are not reachable by anyone else, so there is nothing for a crawler to preview. The demo keeps the site's generic tags.
 

@@ -8,6 +8,7 @@ import {
   originFor,
 } from "./receiptPreview";
 import { renderReceiptPng, renderReceiptSvg } from "./receiptImage";
+import { CARD_FORMATS } from "@shared/cardFormats";
 
 const pending = {
   id: 4821,
@@ -130,6 +131,29 @@ describe("receipt card rendering", () => {
     expect(svg).toContain("<svg");
     expect(svg).toContain('width="1200"');
     expect(svg).toContain('height="630"');
+  });
+
+  it("renders every format at its own dimensions", async () => {
+    for (const [format, size] of Object.entries(CARD_FORMATS)) {
+      const svg = await renderReceiptSvg({ ...pending, username: "nia" }, format as keyof typeof CARD_FORMATS);
+      expect(svg).toContain(`width="${size.width}"`);
+      expect(svg).toContain(`height="${size.height}"`);
+    }
+  });
+
+  it("caches per format, so one shape never serves another", async () => {
+    const story = await renderReceiptPng({ ...pending, id: 991 }, "story");
+    const og = await renderReceiptPng({ ...pending, id: 991 }, "og");
+    expect(story.equals(og)).toBe(false);
+    // A repeat request returns the same bytes rather than re-rendering.
+    expect((await renderReceiptPng({ ...pending, id: 991 }, "story")).equals(story)).toBe(true);
+  });
+
+  it("renders a long prediction at every format without failing", async () => {
+    for (const format of Object.keys(CARD_FORMATS) as Array<keyof typeof CARD_FORMATS>) {
+      const png = await renderReceiptPng({ ...pending, id: 992, prediction: "x ".repeat(140) }, format);
+      expect(png.length).toBeGreaterThan(1000);
+    }
   });
 
   it("renders a PNG", async () => {

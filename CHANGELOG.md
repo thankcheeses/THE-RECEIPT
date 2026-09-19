@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Receipt cards render in three formats — 1200×630 link, 1080×1920 story, 1080×1080 square — requested with `?format=` on `/r/:id/image.png`. The layout scales to each rather than being cropped.
+- Share destinations are grouped by platform, so Instagram can offer both a story and a feed card. Instagram and TikTok get correctly shaped cards rather than a fake posting integration.
+
 - Added author-selected receipt kinds (Prediction, Goal, Personal, Fun) and a shared interaction policy that decides which responses a receipt offers. Goals and personal receipts take support rather than agreement or disagreement; the server enforces the same rule the client renders.
 - Added "Me too": a real, independently authored receipt that records which receipt it followed (`derivedFromId`), rather than a reaction counter.
 - Support and agreement are persisted as distinct interaction types in a new `receiptInteractions` table.
