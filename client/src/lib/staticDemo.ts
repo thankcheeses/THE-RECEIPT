@@ -347,6 +347,27 @@ const syncDemoResolutionNotifications = (state: DemoState, user: DemoUser) => {
   }
 };
 
+/** The public, visible receipts written after `receiptId` ("ME TOO"). */
+const derivedReceipts = (state: DemoState, receiptId: number) =>
+  state.receipts.filter((item) => item.derivedFromId === receiptId && isPubliclyVisible(item));
+
+/** Mirrors summarizeCluster() in server/db.ts. */
+const summarizeDemoCluster = (members: DemoReceipt[]) => {
+  const bucket = { open: 0, right: 0, wrong: 0, partial: 0, tooEarly: 0 };
+  for (const receipt of members) {
+    if (receipt.status === "PENDING" || receipt.status === "LOCKED") bucket.open++;
+    else if (receipt.status === "RIGHT") bucket.right++;
+    else if (receipt.status === "WRONG") bucket.wrong++;
+    else if (receipt.status === "PARTIALLY RIGHT") bucket.partial++;
+    else if (receipt.status === "TOO EARLY") bucket.tooEarly++;
+  }
+  return {
+    total: members.length,
+    ...bucket,
+    resolved: bucket.right + bucket.wrong + bucket.partial + bucket.tooEarly,
+  };
+};
+
 const notify = (
   state: DemoState,
   // receiptId is optional: only receipt-scoped notifications carry one.
@@ -535,12 +556,14 @@ const handlers: Record<string, Handler> = {
     const receipt = state.receipts.find((item) => item.id === input.id && isPubliclyVisible(item));
     if (!receipt) throw new Error("That receipt is private or no longer exists.");
     const mine = state.interactions[String(input.id)] ?? null;
+    const cluster = summarizeDemoCluster(derivedReceipts(state, input.id));
     return {
       // A single-browser demo has one responder, so a count is only ever this
       // person's own response. Reported as such rather than invented.
       counts: mine ? { [mine]: 1 } : {},
       mine,
-      derivedCount: state.receipts.filter((item) => item.derivedFromId === input.id && isPubliclyVisible(item)).length,
+      derivedCount: cluster.total,
+      cluster,
     };
   },
   "receipts.interact": (input: { id: number; type: InteractionType | null }) =>

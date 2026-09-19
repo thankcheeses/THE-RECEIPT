@@ -47,7 +47,7 @@ vi.mock("./db", async (importOriginal) => ({
   },
   getInteractionCounts: async () => ({}),
   getViewerInteraction: async () => null,
-  getDerivedCount: async () => 0,
+  getMeTooCluster: async () => ({ total: 0, open: 0, right: 0, wrong: 0, partial: 0, tooEarly: 0, resolved: 0 }),
   setInteraction: async () => undefined,
   clearInteraction: async () => undefined,
 }));

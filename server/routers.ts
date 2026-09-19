@@ -10,7 +10,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { challenges, dailyChallenges, receipts, users } from "../drizzle/schema";
-import { RESOLVABLE_STATUSES, syncResolutionNotifications, deleteAccount, isUsernameAvailable, applyModerationAction, countOpenReports, createReceiptReport, getReportByReporter, getReportQueue, listModerationActions, canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getDerivedCount, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
+import { getMeTooCluster, RESOLVABLE_STATUSES, syncResolutionNotifications, deleteAccount, isUsernameAvailable, applyModerationAction, countOpenReports, createReceiptReport, getReportByReporter, getReportQueue, listModerationActions, canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
 
 const categorySchema = z.enum(CATEGORIES);
 const semanticTypeSchema = z.enum(SEMANTIC_TYPES);
@@ -123,14 +123,23 @@ export const appRouter = router({
     resolvingSoon: publicProcedure
       .input(z.object({ limit: z.number().int().min(1).max(50).optional() }).optional())
       .query(({ input }) => getResolvingSoon({ limit: input?.limit })),
-    /** Counts per interaction type, the viewer's own response, and ME TOO lineage. */
+    /**
+     * Counts per interaction type, the viewer's own response, and the ME TOO
+     * cluster — the Receipts people independently wrote after this one, and
+     * how they have turned out.
+     *
+     * `derivedCount` is kept as the cluster's total so nothing that reads it
+     * has to change; the cluster is the same number with its outcomes.
+     */
     interactions: publicProcedure.input(z.object({ id: z.number().int().positive() })).query(async ({ ctx, input }) => {
       const result = await getPublicReceipt(input.id);
       if (!result?.receipt) throw new TRPCError({ code: "NOT_FOUND", message: "That receipt is private or no longer exists." });
+      const cluster = await getMeTooCluster(input.id);
       return {
         counts: await getInteractionCounts(input.id),
         mine: ctx.user ? await getViewerInteraction(input.id, ctx.user.id) : null,
-        derivedCount: await getDerivedCount(input.id),
+        derivedCount: cluster.total,
+        cluster,
       };
     }),
     /**
