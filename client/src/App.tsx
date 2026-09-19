@@ -54,6 +54,7 @@ function Header() {
     <Link href="/" className="brand"><span className="brand-mark">R</span><span>THE RECEIPT</span></Link>
     <nav className={`main-nav ${menuOpen ? "open" : ""}`}>
       <Link href="/daily" onClick={() => setMenuOpen(false)}>Today</Link>
+      <Link href="/feed" onClick={() => setMenuOpen(false)}>Feed</Link>
       <Link href="/receipts" onClick={() => setMenuOpen(false)}>My receipts</Link>
       <Link href="/challenges" onClick={() => setMenuOpen(false)}>Challenges</Link>
       <Link href="/leaderboard" onClick={() => setMenuOpen(false)}>Leaderboard</Link>
@@ -251,6 +252,70 @@ function ChallengeDetail() {
   </Page>;
 }
 
+/**
+ * Public discovery. Deliberately the simplest thing that works: newest first,
+ * one optional category, keyset "load more". No ranking, no personalisation.
+ */
+function Feed() {
+  const [category, setCategory] = useState<Category | null>(null);
+  const [pages, setPages] = useState<number[]>([]);
+  const cursor = pages[pages.length - 1];
+  const input = useMemo(() => ({ ...(category ? { category } : {}), ...(cursor ? { cursor } : {}) }), [category, cursor]);
+  const { data, isLoading, isFetching, error } = trpc.receipts.feed.useQuery(input);
+  const [items, setItems] = useState<any[]>([]);
+
+  // Pages accumulate; changing the filter starts over.
+  useEffect(() => { setPages([]); setItems([]); }, [category]);
+  useEffect(() => {
+    if (!data) return;
+    setItems((current) => {
+      const seen = new Set(current.map((item) => item.receipt.id));
+      return [...current, ...data.items.filter((item: any) => !seen.has(item.receipt.id))];
+    });
+  }, [data]);
+
+  const chip = (value: Category | null, label: string) => (
+    <button key={label} className={category === value ? "active" : ""} onClick={() => setCategory(value)}>{label}</button>
+  );
+
+  return <Page eyebrow="PUBLIC RECEIPTS" title="The record so far." description="Every public call, newest first. Somebody is going to be wrong.">
+    <div className="feed-filters">{chip(null, "ALL")}{CATEGORIES.map((item) => chip(item, item))}</div>
+    {error ? <div className="empty-state"><ReceiptText size={32} /><h3>The feed could not load.</h3><p>{error.message}</p></div>
+      : items.length ? <>
+        <div className="feed-grid">{items.map((item) => <Link href={`/r/${item.receipt.id}`} key={item.receipt.id} className="feed-item">
+          <ReceiptPaper receipt={{ ...item.receipt, receiptNumber: String(item.receipt.id).padStart(6, "0") }} compact />
+          <span className="feed-caller">{item.user?.username ? `@${item.user.username}` : item.user?.name || "Anonymous"}</span>
+        </Link>)}</div>
+        {data?.nextCursor ? <div className="feed-more"><button className="button button-secondary" disabled={isFetching} onClick={() => setPages((current) => [...current, data.nextCursor!])}>{isFetching ? "LOADING…" : "LOAD MORE"}</button></div>
+          : <div className="feed-end">THAT IS EVERY PUBLIC RECEIPT{category ? ` IN ${category}` : ""}.</div>}
+      </>
+      : isLoading || isFetching ? <div className="loading-state">Loading receipts…</div>
+      : <div className="empty-state"><ReceiptText size={32} /><h3>{category ? `No public receipts in ${category} yet.` : "No public receipts yet."}</h3><p>{category ? "Try another category, or be the first." : "Be the first to put something on the record."}</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}
+  </Page>;
+}
+
+/** Someone else's public record. Private receipts never reach this page. */
+function PublicProfile() {
+  const [, params] = useRoute("/u/:username");
+  const username = params?.username ?? "";
+  const { data, isLoading, error } = trpc.profile.byUsername.useQuery({ username }, { enabled: Boolean(username), retry: false });
+  if (isLoading) return <Page eyebrow="PUBLIC PROFILE" title="…"><div className="loading-state">Loading profile…</div></Page>;
+  if (error || !data?.user) return <Page eyebrow="PUBLIC PROFILE" title="No such caller"><div className="empty-state"><UserRound size={32} /><h3>Nobody goes by that name.</h3><p>The username may have changed, or never existed.</p><ButtonLink href="/feed">BROWSE RECEIPTS</ButtonLink></div></Page>;
+  const { user, stats, receipts } = data;
+  return <Page eyebrow="PUBLIC PROFILE" title={user.username ? `@${user.username}` : user.name || "A caller"} description="Their public record. Private receipts are not shown.">
+    <div className="profile-stats">
+      <div><span>PUBLIC RECEIPTS</span><strong>{stats.total}</strong></div>
+      <div><span>RESOLVED</span><strong>{stats.resolved}</strong></div>
+      <div><span>ACCURACY</span><strong>{stats.accuracy}%</strong></div>
+      <div><span>STREAK</span><strong><Flame size={18} /> {user.currentStreak}</strong></div>
+    </div>
+    {stats.byCategory.length > 0 && <div className="profile-panel"><SectionLabel>CATEGORIES</SectionLabel>{stats.byCategory.slice(0, 5).map((item) => <div className="category-row" key={item.category}><span>{item.category}</span><strong>{item.accuracy}%</strong><div className="mini-bar"><i style={{ width: `${item.accuracy}%` }} /></div></div>)}</div>}
+    <SectionLabel>PUBLIC RECEIPTS</SectionLabel>
+    {receipts.length ? <div className="feed-grid">{receipts.map((receipt) => <Link href={`/r/${receipt.id}`} key={receipt.id}><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} compact /></Link>)}</div>
+      : <div className="empty-state compact"><ReceiptText size={28} /><h3>Nothing public yet.</h3><p>This caller keeps their receipts to themselves.</p></div>}
+  </Page>;
+}
+
 function Leaderboard() {
   const rows = [{ name: "Mina", handle: "@minacalls", right: 43, accuracy: 82, streak: 18, badge: "BEST ACCURACY" }, { name: "Jules", handle: "@julesonrecord", right: 51, accuracy: 74, streak: 11, badge: "MOST RIGHT" }, { name: "Tariq", handle: "@tariqpredicts", right: 38, accuracy: 71, streak: 27, badge: "LONGEST STREAK" }, { name: "Brianna", handle: "@brianna", right: 31, accuracy: 68, streak: 19, badge: "DEMO PROFILE" }];
   const [view, setView] = useState("MOST RIGHT");
@@ -318,7 +383,7 @@ function AuthPrompt({ title, description }: { title: string; description: string
 
 function NotFound() { return <Page title="404"><div className="empty-state"><ReceiptText size={34} /><h3>This page is off the record.</h3><ButtonLink href="/">BACK HOME</ButtonLink></div></Page>; }
 
-function Router() { return <Switch><Route path="/" component={Home} /><Route path="/daily" component={Daily} /><Route path="/create" component={Create} /><Route path="/receipts" component={MyReceipts} /><Route path="/receipt/:id" component={ReceiptDetail} /><Route path="/r/:id" component={ReceiptDetail} /><Route path="/challenges" component={Challenges} /><Route path="/challenge/:id" component={ChallengeDetail} /><Route path="/leaderboard" component={Leaderboard} /><Route path="/analytics" component={Analytics} /><Route path="/profile" component={Profile} /><Route component={NotFound} /></Switch>; }
+function Router() { return <Switch><Route path="/" component={Home} /><Route path="/daily" component={Daily} /><Route path="/create" component={Create} /><Route path="/receipts" component={MyReceipts} /><Route path="/receipt/:id" component={ReceiptDetail} /><Route path="/r/:id" component={ReceiptDetail} /><Route path="/challenges" component={Challenges} /><Route path="/challenge/:id" component={ChallengeDetail} /><Route path="/feed" component={Feed} /><Route path="/u/:username" component={PublicProfile} /><Route path="/leaderboard" component={Leaderboard} /><Route path="/analytics" component={Analytics} /><Route path="/profile" component={Profile} /><Route component={NotFound} /></Switch>; }
 
 // GitHub Pages serves the app from /THE-RECEIPT/, so every route is prefixed
 // with Vite's base path. It is "/" for the normal server build.

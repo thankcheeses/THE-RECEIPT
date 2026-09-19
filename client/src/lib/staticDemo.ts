@@ -246,6 +246,19 @@ const activityWindow = (state: DemoState, days = 7) => {
   });
 };
 
+/** Mirrors toPublicUser() in server/db.ts. */
+const publicUser = (user: DemoUser | null) =>
+  user && {
+    id: user.id,
+    username: user.username,
+    name: user.name,
+    avatar: user.avatar,
+    currentStreak: user.currentStreak,
+    longestStreak: user.longestStreak,
+    accuracy: user.accuracy,
+    createdAt: user.createdAt,
+  };
+
 const notify = (state: DemoState, input: Omit<DemoNotification, "id" | "readAt" | "createdAt">) => {
   state.notifications.unshift({ ...input, id: state.nextNotificationId++, readAt: null, createdAt: new Date() });
 };
@@ -380,6 +393,20 @@ const handlers: Record<string, Handler> = {
     if (!receipt) throw new Error("That receipt is private or no longer exists.");
     return { receipt, user: state.user };
   },
+  "receipts.feed": (input?: { cursor?: number; category?: string; limit?: number }) => {
+    const state = readState();
+    const limit = Math.min(Math.max(input?.limit ?? 12, 1), 50);
+    const all = state.receipts
+      .filter((receipt) => receipt.visibility === "PUBLIC")
+      .filter((receipt) => (input?.category ? receipt.category === input.category : true))
+      .filter((receipt) => (input?.cursor ? receipt.id < input.cursor : true))
+      .sort((a, b) => b.id - a.id);
+    const items = all.slice(0, limit);
+    return {
+      items: items.map((receipt) => ({ receipt, user: publicUser(state.user) })),
+      nextCursor: all.length > limit ? items[items.length - 1]?.id ?? null : null,
+    };
+  },
   "receipts.mine": () => {
     const state = readState();
     return forUser(state, requireUser(state).id);
@@ -474,6 +501,40 @@ const handlers: Record<string, Handler> = {
     const state = readState();
     const user = requireUser(state);
     return { user, stats: profileStats(state, user.id), receipts: forUser(state, user.id).slice(0, 6) };
+  },
+  "profile.byUsername": (input: { username: string }) => {
+    const state = readState();
+    // One browser, one account: the demo can only resolve its own profile.
+    if (!state.user || (state.user.username ?? "").toLowerCase() !== input.username.toLowerCase()) {
+      throw new Error("No caller with that username.");
+    }
+    const receipts = state.receipts
+      .filter((receipt) => receipt.userId === state.user!.id && receipt.visibility === "PUBLIC")
+      .sort((a, b) => b.id - a.id);
+    const resolved = receipts.filter((receipt) => RESOLVED_STATUSES.includes(receipt.status));
+    const right = resolved.filter((receipt) => receipt.status === "RIGHT");
+    const byCategory = Object.entries(
+      receipts.reduce<Record<string, { total: number; resolved: number; right: number }>>((acc, receipt) => {
+        const current = acc[receipt.category] ?? { total: 0, resolved: 0, right: 0 };
+        current.total++;
+        if (RESOLVED_STATUSES.includes(receipt.status)) current.resolved++;
+        if (receipt.status === "RIGHT") current.right++;
+        acc[receipt.category] = current;
+        return acc;
+      }, {}),
+    ).map(([category, stats]) => ({ category, accuracy: stats.resolved ? Math.round((stats.right / stats.resolved) * 100) : 0, total: stats.total }));
+    return {
+      user: publicUser(state.user),
+      stats: {
+        total: receipts.length,
+        resolved: resolved.length,
+        right: right.length,
+        pending: receipts.length - resolved.length,
+        accuracy: resolved.length ? Math.round((right.length / resolved.length) * 100) : 0,
+        byCategory,
+      },
+      receipts: receipts.slice(0, 12),
+    };
   },
   "profile.setUsername": (input: { username: string }) =>
     mutate((state) => {

@@ -1,4 +1,4 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, uniqueIndex, varchar } from "drizzle-orm/mysql-core";
+import { index, int, mysqlEnum, mysqlTable, text, timestamp, uniqueIndex, varchar } from "drizzle-orm/mysql-core";
 
 export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),
@@ -35,21 +35,31 @@ export const dailyChallenges = mysqlTable("dailyChallenges", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
-export const receipts = mysqlTable("receipts", {
-  id: int("id").autoincrement().primaryKey(),
-  userId: int("userId").notNull(),
-  prediction: text("prediction").notNull(),
-  category: varchar("category", { length: 32 }).notNull(),
-  confidence: int("confidence").notNull(),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-  resolutionDate: timestamp("resolutionDate").notNull(),
-  status: mysqlEnum("status", ["LOCKED", "PENDING", "RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]).default("PENDING").notNull(),
-  result: text("result"),
-  visibility: mysqlEnum("visibility", ["PUBLIC", "PRIVATE"]).default("PUBLIC").notNull(),
-  challengeUserId: int("challengeUserId"),
-  dailyChallengeId: int("dailyChallengeId"),
-  resolvedAt: timestamp("resolvedAt"),
-});
+export const receipts = mysqlTable(
+  "receipts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    prediction: text("prediction").notNull(),
+    category: varchar("category", { length: 32 }).notNull(),
+    confidence: int("confidence").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    resolutionDate: timestamp("resolutionDate").notNull(),
+    status: mysqlEnum("status", ["LOCKED", "PENDING", "RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]).default("PENDING").notNull(),
+    result: text("result"),
+    visibility: mysqlEnum("visibility", ["PUBLIC", "PRIVATE"]).default("PUBLIC").notNull(),
+    challengeUserId: int("challengeUserId"),
+    dailyChallengeId: int("dailyChallengeId"),
+    resolvedAt: timestamp("resolvedAt"),
+  },
+  // The public feed reads `visibility = PUBLIC` newest-first, optionally
+  // narrowed by category. Without these it is a table scan per page.
+  (table) => [
+    index("receipts_visibility_id").on(table.visibility, table.id),
+    index("receipts_visibility_category_id").on(table.visibility, table.category, table.id),
+    index("receipts_user_id").on(table.userId, table.id),
+  ],
+);
 
 export const challenges = mysqlTable("challenges", {
   id: int("id").autoincrement().primaryKey(),

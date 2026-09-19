@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added a public feed at `/feed`: newest-first, category filters, keyset pagination, and empty/loading/error states, built on the existing public-receipt data.
+- Added public profiles at `/u/:username`, showing only public receipts with statistics computed over public receipts alone.
+- Added indexes covering the feed's access paths on `receipts`.
+
 - Added server-rendered social previews for public receipts: per-receipt Open Graph and Twitter card metadata on `/r/:id`, plus a generated 1200×630 PNG at `/r/:id/image.png` drawn from the existing receipt design. Private receipts get neither.
 
 - Resolution now requires the receipt to be due: `receipts.resolve` rejects any attempt before the declared `resolutionDate`, and the detail page shows a "not due yet" state instead of buttons that would fail.

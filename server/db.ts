@@ -1,7 +1,9 @@
-import { and, count, desc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertUser, users, receipts, dailyChallenges, challenges, achievements, dailyActivity, notifications, analyticsEvents } from "../drizzle/schema";
 import { ENV } from "./_core/env";
+
+const RESOLVED_STATUSES: string[] = ["RIGHT", "WRONG", "PARTIALLY RIGHT"];
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -116,6 +118,114 @@ export async function getRecentPublicReceipts(limit = 6) {
   const db = await getDb();
   if (!db) return [];
   return db.select({ receipt: receipts, user: users }).from(receipts).leftJoin(users, eq(receipts.userId, users.id)).where(eq(receipts.visibility, "PUBLIC")).orderBy(desc(receipts.createdAt)).limit(limit);
+}
+
+/**
+ * A page of the public feed, newest first.
+ *
+ * Keyset pagination on `id`: the cursor is the last id of the previous page,
+ * so pages stay stable while new receipts arrive — an OFFSET would shift rows
+ * under the reader.
+ */
+export async function getPublicFeed(options: { cursor?: number; category?: string; limit?: number } = {}) {
+  const limit = Math.min(Math.max(options.limit ?? 12, 1), 50);
+  const db = await getDb();
+  if (!db) return { items: [], nextCursor: null as number | null };
+  const filters = [eq(receipts.visibility, "PUBLIC")];
+  if (options.category) filters.push(eq(receipts.category, options.category));
+  if (options.cursor) filters.push(lt(receipts.id, options.cursor));
+  // One extra row tells us whether another page exists without a count query.
+  const rows = await db
+    .select({ receipt: receipts, user: users })
+    .from(receipts)
+    .leftJoin(users, eq(receipts.userId, users.id))
+    .where(and(...filters))
+    .orderBy(desc(receipts.id))
+    .limit(limit + 1);
+  return buildFeedPage(rows, limit);
+}
+
+/**
+ * Turns an over-fetched row set into a page.
+ *
+ * The caller asks the database for `limit + 1` rows; the extra one is the
+ * signal that another page exists, and is dropped from the result. The cursor
+ * is the last id actually returned, so the next query resumes below it.
+ */
+export function buildFeedPage(
+  rows: Array<{ receipt: { id: number }; user?: Parameters<typeof toPublicUser>[0] }>,
+  limit: number,
+) {
+  const items = rows.slice(0, limit);
+  return {
+    items: items.map((row) => ({ receipt: row.receipt, user: toPublicUser(row.user) })),
+    nextCursor: rows.length > limit ? (items[items.length - 1]?.receipt.id ?? null) : null,
+  };
+}
+
+/**
+ * The subset of a user row that may be shown to anyone. Everything omitted —
+ * openId, email, role, sign-in timestamps — is either identifying or internal.
+ */
+export function toPublicUser(user: typeof users.$inferSelect | null | undefined) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    username: user.username,
+    name: user.name,
+    avatar: user.avatar,
+    currentStreak: user.currentStreak,
+    longestStreak: user.longestStreak,
+    accuracy: user.accuracy,
+    createdAt: user.createdAt,
+  };
+}
+
+export async function listPublicReceiptsForUser(userId: number, limit = 12) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(receipts)
+    .where(and(eq(receipts.userId, userId), eq(receipts.visibility, "PUBLIC")))
+    .orderBy(desc(receipts.id))
+    .limit(limit);
+}
+
+/**
+ * Profile statistics computed over public receipts only.
+ *
+ * getProfileStats() spans everything a user has written, which is right for
+ * their own profile and wrong for a public one: aggregates over private rows
+ * would describe predictions the viewer is not allowed to see.
+ */
+export async function getPublicProfileStats(userId: number) {
+  const all = await listPublicReceiptsForUser(userId, 1000);
+  const resolved = all.filter((receipt) => RESOLVED_STATUSES.includes(receipt.status));
+  const right = resolved.filter((receipt) => receipt.status === "RIGHT");
+  const accuracy = resolved.length ? Math.round((right.length / resolved.length) * 100) : 0;
+  const byCategory = Object.entries(
+    all.reduce<Record<string, { total: number; resolved: number; right: number }>>((acc, receipt) => {
+      const current = acc[receipt.category] ?? { total: 0, resolved: 0, right: 0 };
+      current.total++;
+      if (RESOLVED_STATUSES.includes(receipt.status)) current.resolved++;
+      if (receipt.status === "RIGHT") current.right++;
+      acc[receipt.category] = current;
+      return acc;
+    }, {}),
+  ).map(([category, stats]) => ({
+    category,
+    accuracy: stats.resolved ? Math.round((stats.right / stats.resolved) * 100) : 0,
+    total: stats.total,
+  }));
+  return {
+    total: all.length,
+    resolved: resolved.length,
+    right: right.length,
+    pending: all.length - resolved.length,
+    accuracy,
+    byCategory,
+  };
 }
 
 export async function getChallengeById(id: number) {

@@ -17,6 +17,8 @@ There is no money, betting, or wagering in the product.
 - **Immutable records** — no edit path exists; the only post-creation change is resolution by the owner.
 - **Resolution** — RIGHT, WRONG, PARTIALLY RIGHT, or TOO EARLY, with an optional note.
 - **Public receipt URLs** — `/r/:id` is shareable without signing in; private receipts are never returned by the public procedure.
+- **Public feed** — `/feed` browses every public receipt newest-first, filterable by category, with keyset pagination.
+- **Public profiles** — `/u/:username` shows a caller's public receipts and a record computed from public receipts only.
 - **Streaks** — real daily streaks with a seven-day activity view, plus day-over-day retention data.
 - **Challenges** — name another user when creating a receipt; they can accept and lock their own opposing position.
 - **Notifications** — in-app bell with unread count for challenges received and accepted.
@@ -32,7 +34,9 @@ There is no money, betting, or wagering in the product.
 | `/create` | Custom prediction form with live receipt preview |
 | `/receipts` | Authenticated receipt archive |
 | `/receipt/:id` | Authenticated receipt detail and resolution |
+| `/feed` | Public receipt feed with category filters |
 | `/r/:id` | Public receipt detail |
+| `/u/:username` | Public profile: a caller's public receipts and record |
 | `/challenges` | Authenticated challenge list |
 | `/challenge/:id` | Head-to-head challenge detail and acceptance |
 | `/leaderboard` | Leaderboard views (currently demo-seeded and labeled as such in the UI) |

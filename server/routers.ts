@@ -7,7 +7,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { challenges, dailyChallenges, receipts, users } from "../drizzle/schema";
-import { canResolveAt, countUnreadNotifications, createNotification, recordUserReturn, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getRetentionSummary, getUserById, getUserByUsername, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
+import { canResolveAt, countUnreadNotifications, createNotification, recordUserReturn, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
 
 const categorySchema = z.enum(CATEGORIES);
 const statusSchema = z.enum(["RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]);
@@ -99,6 +99,18 @@ export const appRouter = router({
       if (!result) throw new TRPCError({ code: "NOT_FOUND", message: "That receipt is private or no longer exists." });
       return result;
     }),
+    /** Public discovery feed: newest first, optionally one category. */
+    feed: publicProcedure
+      .input(
+        z
+          .object({
+            cursor: z.number().int().positive().optional(),
+            category: categorySchema.optional(),
+            limit: z.number().int().min(1).max(50).optional(),
+          })
+          .optional(),
+      )
+      .query(({ input }) => getPublicFeed(input ?? {})),
     mine: protectedProcedure.query(({ ctx }) => listReceiptsForUser(ctx.user.id)),
     create: protectedProcedure.input(z.object({ prediction: z.string().trim().min(8).max(280), category: categorySchema, resolutionDate: z.coerce.date(), confidence: z.number().int().min(0).max(100), visibility: z.enum(["PUBLIC", "PRIVATE"]).default("PUBLIC"), challengeUsername: z.string().trim().max(40).optional() })).mutation(async ({ ctx, input }) => {
       if (input.resolutionDate.getTime() <= Date.now()) throw new TRPCError({ code: "BAD_REQUEST", message: "Resolution date must be in the future." });
@@ -159,6 +171,20 @@ export const appRouter = router({
       const user = ctx.user;
       const stats = await getProfileStats(user.id);
       return { user, stats, receipts: (await listReceiptsForUser(user.id)).slice(0, 6) };
+    }),
+    /**
+     * Someone else's profile. Exposes only public receipts and the non-
+     * identifying fields of the account; statistics are computed over public
+     * receipts alone so nothing describes what the viewer cannot see.
+     */
+    byUsername: publicProcedure.input(z.object({ username: z.string().trim().min(1).max(40) })).query(async ({ input }) => {
+      const user = await getUserByUsername(input.username);
+      if (!user) throw new TRPCError({ code: "NOT_FOUND", message: "No caller with that username." });
+      return {
+        user: toPublicUser(user),
+        stats: await getPublicProfileStats(user.id),
+        receipts: await listPublicReceiptsForUser(user.id),
+      };
     }),
     setUsername: protectedProcedure.input(z.object({ username: z.string().trim().min(3).max(24).regex(/^[a-zA-Z0-9_]+$/) })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
