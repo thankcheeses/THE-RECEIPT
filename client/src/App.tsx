@@ -9,6 +9,9 @@ import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
+import { SHARE_TARGETS } from "@/lib/sharing/adapters";
+import { availableTargets, runShare, type ShareContext } from "@/lib/sharing/core";
+import { IS_STATIC_DEMO } from "@/lib/staticDemo";
 
 const dateLabel = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
 const shortDate = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" }) : "—";
@@ -174,6 +177,39 @@ function Create() {
   return <Page eyebrow="CUSTOM RECEIPT" title="Say it with your chest." description="The prediction is yours. The timestamp is ours."><div className="create-layout"><div className="form-card"><label className="field-label">WHAT DO YOU THINK WILL HAPPEN?<textarea value={prediction} onChange={(event) => setPrediction(event.target.value)} maxLength={280} placeholder="I think…" rows={4} /><span className="char-count">{prediction.length}/280</span></label><div className="form-grid"><label className="field-label">CATEGORY<select value={category} onChange={(event) => setCategory(event.target.value as Category)}>{CATEGORIES.map((item) => <option key={item}>{item}</option>)}</select></label><label className="field-label">RESOLUTION DATE<input type="date" value={resolutionDate} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setResolutionDate(event.target.value)} /></label></div><div className="confidence-block form-confidence"><div className="confidence-head"><span>HOW CONFIDENT?</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>VIBES</span><span>ABSOLUTE FACT (TO ME)</span></div></div><label className="field-label">CHALLENGE SOMEONE <span className="optional">OPTIONAL</span><input value={challengeUsername} onChange={(event) => setChallengeUsername(event.target.value)} placeholder="@username" /></label><div className="visibility-toggle"><button className={visibility === "PUBLIC" ? "active" : ""} onClick={() => setVisibility("PUBLIC")}>PUBLIC <span>Shareable link</span></button><button className={visibility === "PRIVATE" ? "active" : ""} onClick={() => setVisibility("PRIVATE")}>PRIVATE <span>Just for you</span></button></div><label className="confirm-row"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>Once you print it, you can’t edit it. I understand future-me may disagree.</span></label><button className="button button-dark button-wide" disabled={!prediction.trim() || !confirmed || mutation.isPending} onClick={submit}><LockKeyhole size={17} /> {mutation.isPending ? "PRINTING…" : "LOCK IT IN"}</button>{mutation.error && <div className="error-message">{mutation.error.message}</div>}</div><div className="preview-column"><span className="eyebrow">LIVE PREVIEW</span><ReceiptPaper receipt={{ id: "4821", receiptNumber: "004821", prediction: prediction || "Your prediction goes here.", category, confidence, status: "PENDING", createdAt: new Date(), resolutionDate }} /><p className="preview-caption">This is what your future self will find.</p></div></div></Page>;
 }
 
+/**
+ * The share surface. Targets come from the sharing adapters, so this component
+ * holds no platform URLs and gains new platforms without changing.
+ */
+function ShareSheet({ context, onShared }: { context: ShareContext; onShared: (method: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const targets = availableTargets(SHARE_TARGETS, context);
+  const primary = targets.filter((target) => target.kind === "native" || target.kind === "clipboard");
+  const rest = targets.filter((target) => target.kind !== "native" && target.kind !== "clipboard");
+
+  const activate = async (target: (typeof targets)[number]) => {
+    const outcome = await runShare(target, context);
+    if (outcome.message) (outcome.ok ? toast.success : toast.error)(outcome.message);
+    if (outcome.ok) onShared(outcome.method);
+  };
+
+  return <div className="share-sheet">
+    <div className="detail-actions">
+      {primary.map((target) => <button key={target.id} className={target.id === "copy" ? "button button-dark" : "button button-secondary"} onClick={() => activate(target)}>
+        {target.id === "copy" ? <Copy size={16} /> : <Share2 size={16} />} {target.label.toUpperCase()}
+      </button>)}
+      <button className="button button-secondary" onClick={() => setOpen((value) => !value)} aria-expanded={open}>{open ? "FEWER OPTIONS" : "MORE PLACES"}</button>
+    </div>
+    {open && <div className="share-targets">
+      {rest.map((target) => <button key={target.id} className="share-target" onClick={() => activate(target)}>
+        <strong>{target.label}</strong>
+        <span>{target.note}</span>
+      </button>)}
+      <p className="share-disclaimer">Nothing is posted for you. These open each platform's own composer with the text ready, and you decide whether to send it.</p>
+    </div>}
+  </div>;
+}
+
 function ReceiptDetail() {
   const [, params] = useRoute("/receipt/:id");
   const [, publicParams] = useRoute("/r/:id");
@@ -191,20 +227,22 @@ function ReceiptDetail() {
   // The server refuses resolution before resolutionDate, so the buttons only
   // appear once the receipt is actually due.
   const isDue = receipt ? Date.now() >= new Date(receipt.resolutionDate).getTime() : false;
-  const copy = async () => {
-    await navigator.clipboard?.writeText(window.location.href);
-    track.mutate({ event: "receipt_shared", properties: { receiptId: id, method: "copy", surface: isPublic ? "public" : "owner" } });
-    toast.success("Receipt link copied.");
-  };
-  const share = async () => {
-    if (navigator.share) {
-      await navigator.share({ title: "THE RECEIPT", text: "Put it on the record.", url: window.location.href });
-      track.mutate({ event: "receipt_shared", properties: { receiptId: id, method: "web-share", surface: isPublic ? "public" : "owner" } });
-    } else {
-      await copy();
-    }
-  };
-  return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><div className="detail-actions"><button className="button button-dark" onClick={copy}><Copy size={16} /> COPY RECEIPT LINK</button><button className="button button-secondary" onClick={share}><Share2 size={16} /> SHARE</button></div>{!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && !isDue && <div className="resolve-box pending-box"><div><span className="eyebrow">NOT DUE YET</span><h3>Reality is still working on it.</h3><p className="muted">This receipt resolves {dateLabel(receipt.resolutionDate)}. You can record the result then — not before.</p></div><div className="pending-clock"><Clock3 size={26} /></div></div>}
+  const shareContext: ShareContext = useMemo(() => {
+    const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+    const canonical = `${window.location.origin}${base}/r/${id}`;
+    return {
+      url: canonical,
+      title: receipt ? `Receipt #${String(receipt.id).padStart(6, "0")} — THE RECEIPT` : "THE RECEIPT",
+      text: receipt ? `I was ${receipt.confidence}% sure: “${receipt.prediction}”` : "Put it on the record.",
+      // The card is rendered by the Node app; the static demo has no such
+      // endpoint, so image-bearing targets are simply not offered there.
+      imageUrl: receipt && !IS_STATIC_DEMO ? `${canonical}/image.png` : null,
+      receiptId: id,
+    };
+  }, [id, receipt]);
+  const onShared = (method: string) =>
+    track.mutate({ event: "receipt_shared", properties: { receiptId: id, method, surface: isPublic ? "public" : "owner" } });
+  return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><ShareSheet context={shareContext} onShared={onShared} />{!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && !isDue && <div className="resolve-box pending-box"><div><span className="eyebrow">NOT DUE YET</span><h3>Reality is still working on it.</h3><p className="muted">This receipt resolves {dateLabel(receipt.resolutionDate)}. You can record the result then — not before.</p></div><div className="pending-clock"><Clock3 size={26} /></div></div>}
       {!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && isDue && <div className="resolve-box"><div><span className="eyebrow">TIME TO FACE THE MUSIC?</span><h3>How did it go?</h3></div><div className="resolve-actions"><button onClick={() => resolveMutation.mutate({ id, result: "RIGHT" })} className="result-button right">RIGHT</button><button onClick={() => resolveMutation.mutate({ id, result: "PARTIALLY RIGHT" })} className="result-button partial">PARTIAL</button><button onClick={() => resolveMutation.mutate({ id, result: "WRONG" })} className="result-button wrong">WRONG</button><button onClick={() => resolveMutation.mutate({ id, result: "TOO EARLY" })} className="result-button early">TOO EARLY</button></div></div>}</div><aside className="detail-aside"><div className="share-hook"><Sparkles size={20} /><span className="eyebrow">YOUR TURN</span><h3>What do <em>you</em> think will happen?</h3><ButtonLink href="/create">MAKE YOUR RECEIPT</ButtonLink></div><div className="detail-meta"><span>RECEIPT DETAILS</span><dl><dt>CREATOR</dt><dd>{user?.username || user?.name || "You"}</dd><dt>STATUS</dt><dd className={statusClass(receipt.status)}>{receipt.status}</dd><dt>CONFIDENCE</dt><dd>{receipt.confidence}%</dd><dt>RESOLVES</dt><dd>{dateLabel(receipt.resolutionDate)}</dd></dl></div></aside></> : <div className="empty-state"><ReceiptText size={34} /><h3>That receipt is missing.</h3><p>It may be private, or the number may have been typed with too much confidence.</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}</div></Page>;
 }
 

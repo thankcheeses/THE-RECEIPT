@@ -24,6 +24,7 @@ There is no money, betting, or wagering in the product.
 - **Notifications** — in-app bell with unread count for challenges received and accepted.
 - **Profiles** — accuracy, category breakdown, confidence calibration, biggest call, and biggest miss.
 - **Analytics** — a small closed event vocabulary covering signup, receipt creation, sharing, and resolution.
+- **Sharing** — one interface with platform adapters: OS share sheet, copy link, and composer intents for X, Bluesky, WhatsApp, Reddit and Facebook.
 
 ## Routes
 
@@ -79,6 +80,23 @@ pnpm db:push                # both, in sequence
 ```
 
 Review generated SQL before applying it to a database that holds real data.
+
+## Sharing
+
+Sharing goes through one interface (`client/src/lib/sharing/`): components ask for the available targets and run one, and hold no platform URLs themselves.
+
+Every target is either a browser capability or a documented public web intent. **Nothing posts on a user's behalf.** An intent opens the platform's own composer with the text prefilled and the user decides whether to send it. No platform credentials are stored or required.
+
+| Target | What it actually does |
+| --- | --- |
+| Share… | Hands off to the OS share sheet (where `navigator.share` exists) |
+| Copy link | Copies the canonical `/r/:id` URL |
+| X, Bluesky, WhatsApp, Reddit, Facebook | Opens that platform's composer with text prefilled; the user posts |
+| Save receipt image | Downloads the generated card |
+
+Instagram and TikTok have **no web intent for composing a post**. Publishing to them requires their Content Publishing / Content Posting APIs, which need a registered app, platform review, an eligible business or creator account, and server-held credentials. Rather than implying one-tap posting, the product offers the receipt card for the user to post themselves.
+
+Every share points at the canonical receipt URL.
 
 ## Social previews
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a sharing abstraction with platform adapters: OS share sheet, copy link, composer intents for X, Bluesky, WhatsApp, Reddit and Facebook, and a receipt-image download for platforms that have no web intent. Nothing posts on the user's behalf.
+
 - Added a public feed at `/feed`: newest-first, category filters, keyset pagination, and empty/loading/error states, built on the existing public-receipt data.
 - Added public profiles at `/u/:username`, showing only public receipts with statistics computed over public receipts alone.
 - Added indexes covering the feed's access paths on `receipts`.
