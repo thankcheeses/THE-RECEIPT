@@ -120,4 +120,22 @@ describe("GET /r/:id/image.png", () => {
   it("rejects a malformed id", async () => {
     expect((await fetch(`${base}/r/0/image.png`)).status).toBe(400);
   });
+
+  it("serves each requested format", async () => {
+    for (const format of ["og", "story", "square"]) {
+      const res = await fetch(`${base}/r/4821/image.png?format=${format}`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("image/png");
+    }
+  });
+
+  it("rejects an unknown format instead of quietly serving a link card", async () => {
+    expect((await fetch(`${base}/r/4821/image.png?format=portrait`)).status).toBe(400);
+    expect((await fetch(`${base}/r/4821/image.png?format=`)).status).toBe(400);
+  });
+
+  it("serves the link card when no format is asked for", async () => {
+    const res = await fetch(`${base}/r/4821/image.png`);
+    expect(res.status).toBe(200);
+  });
 });

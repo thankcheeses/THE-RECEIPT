@@ -11,7 +11,8 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { INTERACTION_COPY, SEMANTIC_TYPES, SEMANTIC_TYPE_COPY, defaultSemanticTypeFor, interactionsFor, resolveSemanticType, type SemanticType } from "@shared/interactionPolicy";
 import { SHARE_TARGETS } from "@/lib/sharing/adapters";
-import { availableTargets, runShare, type ShareContext } from "@/lib/sharing/core";
+import { availableTargets, groupedTargets, runShare, type ShareContext } from "@/lib/sharing/core";
+import { type CardFormat } from "@shared/cardFormats";
 import { IS_STATIC_DEMO } from "@/lib/staticDemo";
 
 const dateLabel = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
@@ -252,11 +253,16 @@ function ReceiptActions({ receipt }: { receipt: any }) {
  */
 function ShareSheet({ context, onShared }: { context: ShareContext; onShared: (method: string) => void }) {
   const [open, setOpen] = useState(false);
-  const targets = availableTargets(SHARE_TARGETS, context);
-  const primary = targets.filter((target) => target.kind === "native" || target.kind === "clipboard");
-  const rest = targets.filter((target) => target.kind !== "native" && target.kind !== "clipboard");
+  const everyday = availableTargets(SHARE_TARGETS, context).filter(
+    (target) => target.platform === "device" || target.platform === "link",
+  );
+  // Everything else is grouped by platform, so one platform can offer several
+  // destinations without the list becoming a flat pile of buttons.
+  const groups = groupedTargets(SHARE_TARGETS, context).filter(
+    (group) => group.platform.id !== "device" && group.platform.id !== "link",
+  );
 
-  const activate = async (target: (typeof targets)[number]) => {
+  const activate = async (target: (typeof everyday)[number]) => {
     const outcome = await runShare(target, context);
     if (outcome.message) (outcome.ok ? toast.success : toast.error)(outcome.message);
     if (outcome.ok) onShared(outcome.method);
@@ -264,17 +270,22 @@ function ShareSheet({ context, onShared }: { context: ShareContext; onShared: (m
 
   return <div className="share-sheet">
     <div className="detail-actions">
-      {primary.map((target) => <button key={target.id} className={target.id === "copy" ? "button button-dark" : "button button-secondary"} onClick={() => activate(target)}>
-        {target.id === "copy" ? <Copy size={16} /> : <Share2 size={16} />} {target.label.toUpperCase()}
+      {everyday.map((target) => <button key={target.id} className={target.platform === "link" ? "button button-dark" : "button button-secondary"} onClick={() => activate(target)}>
+        {target.platform === "link" ? <Copy size={16} /> : <Share2 size={16} />} {target.action.toUpperCase()}
       </button>)}
       <button className="button button-secondary" onClick={() => setOpen((value) => !value)} aria-expanded={open}>{open ? "FEWER OPTIONS" : "MORE PLACES"}</button>
     </div>
     {open && <div className="share-targets">
-      {rest.map((target) => <button key={target.id} className="share-target" onClick={() => activate(target)}>
-        <strong>{target.label}</strong>
-        <span>{target.note}</span>
-      </button>)}
-      <p className="share-disclaimer">Nothing is posted for you. These open each platform's own composer with the text ready, and you decide whether to send it.</p>
+      {groups.map((group) => <div className="share-group" key={group.platform.id}>
+        <span className="share-group-name">{group.platform.label}</span>
+        <div className="share-group-actions">
+          {group.targets.map((target) => <button key={target.id} className="share-target" onClick={() => activate(target)} title={target.note}>
+            <strong>{target.action}</strong>
+            <span>{target.note}</span>
+          </button>)}
+        </div>
+      </div>)}
+      <p className="share-disclaimer">Nothing is posted for you. These open each platform's own composer with the text ready, or hand you a card to post yourself.</p>
     </div>}
   </div>;
 }
@@ -303,9 +314,10 @@ function ReceiptDetail() {
       url: canonical,
       title: receipt ? `Receipt #${String(receipt.id).padStart(6, "0")} — THE RECEIPT` : "THE RECEIPT",
       text: receipt ? `I was ${receipt.confidence}% sure: “${receipt.prediction}”` : "Put it on the record.",
-      // The card is rendered by the Node app; the static demo has no such
-      // endpoint, so image-bearing targets are simply not offered there.
-      imageUrl: receipt && !IS_STATIC_DEMO ? `${canonical}/image.png` : null,
+      // Cards are rendered by the Node app; the static demo has no such
+      // endpoint, so card destinations are simply not offered there.
+      cardUrl: (format: CardFormat) =>
+        receipt && !IS_STATIC_DEMO ? `${canonical}/image.png?format=${format}` : null,
       receiptId: id,
     };
   }, [id, receipt]);

@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getPublicReceipt } from "./db";
 import { RECEIPT_IMAGE_HEIGHT, RECEIPT_IMAGE_WIDTH, renderReceiptPng } from "./receiptImage";
+import { isCardFormat, resolveCardFormat } from "@shared/cardFormats";
 
 const SITE_NAME = "THE RECEIPT";
 const TAGLINE = "Put it on the record.";
@@ -142,6 +143,10 @@ export function registerReceiptPreview(app: Express, distPath: string) {
   app.get("/r/:id/image.png", async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).end();
+    // An unknown format is rejected rather than quietly served as a link card,
+    // so a caller never receives a shape it did not ask for.
+    if (req.query.format !== undefined && !isCardFormat(req.query.format)) return res.status(400).end();
+    const format = resolveCardFormat(req.query.format);
     try {
       const result = await getPublicReceipt(id);
       if (!result?.receipt) return res.status(404).end();
@@ -149,7 +154,7 @@ export function registerReceiptPreview(app: Express, distPath: string) {
         ...result.receipt,
         username: result.user?.username ?? result.user?.name ?? null,
         canonicalLabel: `${originFor(req).replace(/^https?:\/\//, "")}/r/${id}`,
-      });
+      }, format);
       res.setHeader("Content-Type", "image/png");
       res.setHeader("Cache-Control", "public, max-age=300");
       res.end(png);
