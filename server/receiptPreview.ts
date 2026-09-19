@@ -18,6 +18,7 @@ import path from "node:path";
 import { getPublicReceipt } from "./db";
 import { RECEIPT_IMAGE_HEIGHT, RECEIPT_IMAGE_WIDTH, renderReceiptPng } from "./receiptImage";
 import { isCardFormat, resolveCardFormat } from "@shared/cardFormats";
+import { authorLabel } from "@shared/accountDeletion";
 
 const SITE_NAME = "THE RECEIPT";
 const TAGLINE = "Put it on the record.";
@@ -41,6 +42,8 @@ const shortDate = (value: Date | string) =>
 
 type PreviewReceipt = {
   id: number;
+  /** Null once the author deleted their account. */
+  userId?: number | null;
   prediction: string;
   category: string;
   confidence: number;
@@ -55,7 +58,7 @@ type PreviewUser = { username?: string | null; name?: string | null } | null | u
  * verdict, because that is the interesting part once reality has answered.
  */
 export function buildReceiptDescription(receipt: PreviewReceipt, user: PreviewUser) {
-  const who = user?.username ? `@${user.username}` : user?.name || "Someone";
+  const who = authorLabel(receipt, user, "Someone");
   const resolved = ["RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"].includes(receipt.status);
   const verdict = resolved
     ? `${receipt.status}.`

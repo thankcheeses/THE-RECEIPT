@@ -24,10 +24,17 @@ export const ABUSE_CONTACT = (import.meta.env.VITE_ABUSE_CONTACT ?? "").trim();
 // call would desync it from an in-flight login and the callback would reject it
 // with "invalid oauth state". It returns void by design, so there is no URL to
 // stash across renders.
-export const startLogin = () => {
+export const startLogin = (options?: { automatic?: boolean }) => {
   // The static (GitHub Pages) build has no OAuth callback endpoint to return
   // to, so it signs in a local demo account instead of leaving the site.
-  if (IS_STATIC_DEMO) return startDemoLogin();
+  //
+  // Only ever on purpose, though. An `automatic` call comes from the global
+  // handler that reacts to an UNAUTHORIZED query — on the server build that is
+  // "your session expired, go and sign in", but here it would *fabricate an
+  // account*. After someone deletes theirs, a still-mounted protected query
+  // errors and would sign them straight back in as somebody new. Staying
+  // signed out is the honest equivalent of being sent to a login screen.
+  if (IS_STATIC_DEMO) return options?.automatic ? undefined : startDemoLogin();
 
   const oauthPortalUrl = import.meta.env.VITE_OAUTH_PORTAL_URL;
   const appId = import.meta.env.VITE_APP_ID;

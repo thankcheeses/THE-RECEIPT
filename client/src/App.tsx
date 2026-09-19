@@ -2,7 +2,7 @@ import { ABUSE_CONTACT, startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 import { DEMO_RECEIPTS, CATEGORIES, type Category } from "@shared/seed";
-import { Activity, ArrowRight, BarChart3, Bell, Heart, Check, ChevronRight, Clock3, Copy, EyeOff, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, ShieldAlert, Sparkles, Target, Trophy, UserRound, X, Zap } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, Bell, Heart, Check, ChevronRight, Clock3, Copy, EyeOff, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, ShieldAlert, Sparkles, Target, Trophy, UserRound, UserX, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, Route, Router as WouterRouter, Switch, useLocation, useRoute } from "wouter";
 import { Toaster } from "@/components/ui/sonner";
@@ -14,6 +14,7 @@ import { SHARE_TARGETS } from "@/lib/sharing/adapters";
 import { availableTargets, groupedTargets, runShare, type ShareContext } from "@/lib/sharing/core";
 import { type CardFormat } from "@shared/cardFormats";
 import { MAX_REPORT_DETAIL, MODERATION_ACTION_COPY, MODERATION_ACTIONS, REPORT_REASONS, REPORT_REASON_COPY, resolveModerationStatus, type ModerationAction, type ReportReason, type ReportStatus } from "@shared/moderation";
+import { DELETED_AUTHOR_LABEL, authorLabel, isAuthorDeleted, isUnresolvable } from "@shared/accountDeletion";
 import { IS_STATIC_DEMO } from "@/lib/staticDemo";
 
 const dateLabel = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
@@ -405,10 +406,11 @@ function ReceiptDetail() {
   }, [id, receipt]);
   const onShared = (method: string) =>
     track.mutate({ event: "receipt_shared", properties: { receiptId: id, method, surface: isPublic ? "public" : "owner" } });
-  return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><ReceiptActions receipt={receipt} /><ShareSheet context={shareContext} onShared={onShared} />{isPublic && <ReportControl receipt={receipt} />}
+  return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={receipt && isAuthorDeleted(receipt) ? "The account that wrote this has been deleted. The receipt stands." : user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><ReceiptActions receipt={receipt} /><ShareSheet context={shareContext} onShared={onShared} />{isPublic && isUnresolvable(receipt) && <div className="resolve-box orphan-box"><div><span className="eyebrow">NO ONE CAN RESOLVE THIS</span><h3>This receipt will stay open.</h3><p className="muted">Only the author can record a result, and this account was deleted. The prediction stands exactly as it was written — nobody will mark it right or wrong.</p></div><div className="pending-clock"><UserX size={26} /></div></div>}
+      {isPublic && <ReportControl receipt={receipt} />}
       {!isPublic && resolveModerationStatus((receipt as any).moderationStatus) === "HIDDEN" && <div className="resolve-box moderation-box"><div><span className="eyebrow">REMOVED FROM PUBLIC VIEW</span><h3>A moderator took this off the public surfaces.</h3><p className="muted">The receipt itself is untouched — it is still locked, still yours, and still resolvable. It no longer appears in the feed, on your public profile, or at its public link.{ABUSE_CONTACT ? <> If you think that was wrong, write to <a href={`mailto:${ABUSE_CONTACT}`}>{ABUSE_CONTACT}</a>.</> : null}</p></div><div className="pending-clock"><ShieldAlert size={26} /></div></div>}
       {!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && !isDue && <div className="resolve-box pending-box"><div><span className="eyebrow">NOT DUE YET</span><h3>Reality is still working on it.</h3><p className="muted">This receipt resolves {dateLabel(receipt.resolutionDate)}. You can record the result then — not before.</p></div><div className="pending-clock"><Clock3 size={26} /></div></div>}
-      {!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && isDue && <div className="resolve-box"><div><span className="eyebrow">TIME TO FACE THE MUSIC?</span><h3>How did it go?</h3></div><div className="resolve-actions"><button onClick={() => resolveMutation.mutate({ id, result: "RIGHT" })} className="result-button right">RIGHT</button><button onClick={() => resolveMutation.mutate({ id, result: "PARTIALLY RIGHT" })} className="result-button partial">PARTIAL</button><button onClick={() => resolveMutation.mutate({ id, result: "WRONG" })} className="result-button wrong">WRONG</button><button onClick={() => resolveMutation.mutate({ id, result: "TOO EARLY" })} className="result-button early">TOO EARLY</button></div></div>}</div><aside className="detail-aside"><div className="share-hook"><Sparkles size={20} /><span className="eyebrow">YOUR TURN</span><h3>What do <em>you</em> think will happen?</h3><ButtonLink href="/create">MAKE YOUR RECEIPT</ButtonLink></div><div className="detail-meta"><span>RECEIPT DETAILS</span><dl><dt>CREATOR</dt><dd>{user?.username || user?.name || "You"}</dd><dt>STATUS</dt><dd className={statusClass(receipt.status)}>{receipt.status}</dd><dt>CONFIDENCE</dt><dd>{receipt.confidence}%</dd><dt>RESOLVES</dt><dd>{dateLabel(receipt.resolutionDate)}</dd></dl></div></aside></> : <div className="empty-state"><ReceiptText size={34} /><h3>That receipt is missing.</h3><p>It may be private, or the number may have been typed with too much confidence.</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}</div></Page>;
+      {!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && isDue && <div className="resolve-box"><div><span className="eyebrow">TIME TO FACE THE MUSIC?</span><h3>How did it go?</h3></div><div className="resolve-actions"><button onClick={() => resolveMutation.mutate({ id, result: "RIGHT" })} className="result-button right">RIGHT</button><button onClick={() => resolveMutation.mutate({ id, result: "PARTIALLY RIGHT" })} className="result-button partial">PARTIAL</button><button onClick={() => resolveMutation.mutate({ id, result: "WRONG" })} className="result-button wrong">WRONG</button><button onClick={() => resolveMutation.mutate({ id, result: "TOO EARLY" })} className="result-button early">TOO EARLY</button></div></div>}</div><aside className="detail-aside"><div className="share-hook"><Sparkles size={20} /><span className="eyebrow">YOUR TURN</span><h3>What do <em>you</em> think will happen?</h3><ButtonLink href="/create">MAKE YOUR RECEIPT</ButtonLink></div><div className="detail-meta"><span>RECEIPT DETAILS</span><dl><dt>CREATOR</dt><dd>{isPublic ? authorLabel(receipt, user) : "You"}</dd><dt>STATUS</dt><dd className={statusClass(receipt.status)}>{receipt.status}</dd><dt>CONFIDENCE</dt><dd>{receipt.confidence}%</dd><dt>RESOLVES</dt><dd>{dateLabel(receipt.resolutionDate)}</dd></dl></div></aside></> : <div className="empty-state"><ReceiptText size={34} /><h3>That receipt is missing.</h3><p>It may be private, or the number may have been typed with too much confidence.</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}</div></Page>;
 }
 
 function MyReceipts() {
@@ -497,7 +499,7 @@ function Feed() {
       : soonItems.length ? <>
         <div className="feed-grid">{soonItems.map((item: any) => <Link href={`/r/${item.receipt.id}`} key={item.receipt.id} className="feed-item">
           <ReceiptPaper receipt={{ ...item.receipt, receiptNumber: String(item.receipt.id).padStart(6, "0") }} compact />
-          <span className="feed-caller">{item.user?.username ? `@${item.user.username}` : item.user?.name || "Anonymous"} · resolves {dateLabel(item.receipt.resolutionDate)}</span>
+          <span className="feed-caller">{authorLabel(item.receipt, item.user)} · resolves {dateLabel(item.receipt.resolutionDate)}</span>
         </Link>)}</div>
         <div className="feed-end">REALITY IS STILL WORKING ON THESE.</div>
       </>
@@ -507,7 +509,7 @@ function Feed() {
       : items.length ? <>
         <div className="feed-grid">{items.map((item) => <Link href={`/r/${item.receipt.id}`} key={item.receipt.id} className="feed-item">
           <ReceiptPaper receipt={{ ...item.receipt, receiptNumber: String(item.receipt.id).padStart(6, "0") }} compact />
-          <span className="feed-caller">{item.user?.username ? `@${item.user.username}` : item.user?.name || "Anonymous"}</span>
+          <span className="feed-caller">{authorLabel(item.receipt, item.user)}</span>
         </Link>)}</div>
         {data?.nextCursor ? <div className="feed-more"><button className="button button-secondary" disabled={isFetching} onClick={() => setPages((current) => [...current, data.nextCursor!])}>{isFetching ? "LOADING…" : "LOAD MORE"}</button></div>
           : <div className="feed-end">THAT IS EVERY PUBLIC RECEIPT{category ? ` IN ${category}` : ""}.</div>}
@@ -554,7 +556,7 @@ function Profile() {
   if (!isAuthenticated) return <Page eyebrow="YOUR REPUTATION" title="Profile"><AuthPrompt title="Your profile starts with your first receipt." description="Sign in to see your accuracy, streak, and biggest calls." /></Page>;
   if (isLoading || !data) return <Page><div className="loading-state">Loading profile…</div></Page>;
   const { user, stats } = data;
-  return <Page eyebrow="YOUR REPUTATION" title={user.username ? user.username.toUpperCase() : "Your profile"} description="A little scoreboard for the things you were willing to say out loud."><div className="profile-top"><div className="profile-identity"><div className="profile-avatar">{(user.username || user.name || "R")[0].toUpperCase()}</div><div><h2>{user.username ? `@${user.username}` : "Choose a username"}</h2><span className="muted">{user.name || "New caller"}</span></div></div>{!user.username && <div className="username-form"><input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="your_username" /><button className="button button-dark" onClick={() => setUsernameMutation.mutate({ username })}>SAVE</button></div>}</div><div className="profile-stats"><div><span>RECEIPTS</span><strong>{stats.total}</strong></div><div><span>RESOLVED</span><strong>{stats.resolved}</strong></div><div><span>ACCURACY</span><strong>{stats.accuracy}%</strong></div><div><span>STREAK</span><strong><Flame size={18} /> {user.currentStreak || 0}</strong></div></div><div className="profile-grid"><div className="profile-panel"><SectionLabel>CONFIDENCE CALIBRATION</SectionLabel><div className="calibration"><div className="calibration-bar"><i style={{ width: `${Math.max(stats.accuracy, 8)}%` }} /></div><div className="calibration-labels"><span>LOW CONFIDENCE</span><strong>{stats.accuracy}% RIGHT</strong><span>HIGH CONFIDENCE</span></div></div><p className="muted">Your simple accuracy rate across resolved receipts. Calibration gets more interesting as the archive grows.</p></div><div className="profile-panel category-panel"><SectionLabel>BEST CATEGORIES</SectionLabel>{stats.byCategory.length ? stats.byCategory.slice(0, 3).map((item) => <div className="category-row" key={item.category}><span>{item.category}</span><strong>{item.accuracy}%</strong><div className="mini-bar"><i style={{ width: `${item.accuracy}%` }} /></div></div>) : <p className="muted">Your categories will appear after you resolve a few receipts.</p>}</div></div><div className="profile-highlights"><div className="highlight-card miss"><span className="eyebrow">BIGGEST MISS</span><strong>{stats.biggestMiss ? `${stats.biggestMiss.confidence}% CONFIDENCE` : "—"}</strong><p>{stats.biggestMiss?.prediction || "Your future self has not humbled you yet."}</p><b>{stats.biggestMiss ? "WRONG" : "PENDING"}</b></div><div className="highlight-card call"><span className="eyebrow">BIGGEST CALL</span><strong>{stats.biggestCall ? `${stats.biggestCall.confidence}% CONFIDENCE` : "—"}</strong><p>{stats.biggestCall?.prediction || "Make a bold call. We’ll keep the receipt."}</p><b>{stats.biggestCall ? "RIGHT" : "CALLER"}</b></div></div></Page>;
+  return <Page eyebrow="YOUR REPUTATION" title={user.username ? user.username.toUpperCase() : "Your profile"} description="A little scoreboard for the things you were willing to say out loud."><div className="profile-top"><div className="profile-identity"><div className="profile-avatar">{(user.username || user.name || "R")[0].toUpperCase()}</div><div><h2>{user.username ? `@${user.username}` : "Choose a username"}</h2><span className="muted">{user.name || "New caller"}</span></div></div>{!user.username && <div className="username-form"><input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="your_username" /><button className="button button-dark" onClick={() => setUsernameMutation.mutate({ username })}>SAVE</button></div>}</div><div className="profile-stats"><div><span>RECEIPTS</span><strong>{stats.total}</strong></div><div><span>RESOLVED</span><strong>{stats.resolved}</strong></div><div><span>ACCURACY</span><strong>{stats.accuracy}%</strong></div><div><span>STREAK</span><strong><Flame size={18} /> {user.currentStreak || 0}</strong></div></div><div className="profile-grid"><div className="profile-panel"><SectionLabel>CONFIDENCE CALIBRATION</SectionLabel><div className="calibration"><div className="calibration-bar"><i style={{ width: `${Math.max(stats.accuracy, 8)}%` }} /></div><div className="calibration-labels"><span>LOW CONFIDENCE</span><strong>{stats.accuracy}% RIGHT</strong><span>HIGH CONFIDENCE</span></div></div><p className="muted">Your simple accuracy rate across resolved receipts. Calibration gets more interesting as the archive grows.</p></div><div className="profile-panel category-panel"><SectionLabel>BEST CATEGORIES</SectionLabel>{stats.byCategory.length ? stats.byCategory.slice(0, 3).map((item) => <div className="category-row" key={item.category}><span>{item.category}</span><strong>{item.accuracy}%</strong><div className="mini-bar"><i style={{ width: `${item.accuracy}%` }} /></div></div>) : <p className="muted">Your categories will appear after you resolve a few receipts.</p>}</div></div><DeleteAccount /><div className="profile-highlights"><div className="highlight-card miss"><span className="eyebrow">BIGGEST MISS</span><strong>{stats.biggestMiss ? `${stats.biggestMiss.confidence}% CONFIDENCE` : "—"}</strong><p>{stats.biggestMiss?.prediction || "Your future self has not humbled you yet."}</p><b>{stats.biggestMiss ? "WRONG" : "PENDING"}</b></div><div className="highlight-card call"><span className="eyebrow">BIGGEST CALL</span><strong>{stats.biggestCall ? `${stats.biggestCall.confidence}% CONFIDENCE` : "—"}</strong><p>{stats.biggestCall?.prediction || "Make a bold call. We’ll keep the receipt."}</p><b>{stats.biggestCall ? "RIGHT" : "CALLER"}</b></div></div></Page>;
 }
 
 /**
@@ -601,6 +603,58 @@ function Analytics() {
       </div>
     </div>
   </Page>;
+}
+
+/**
+ * Closing your account.
+ *
+ * Irreversible and says so. The confirmation is typed rather than a second
+ * button, because the consequences are not reversible by an undo: the account
+ * goes, the username can never be claimed again, and any public receipts that
+ * stay are permanently detached from you.
+ */
+function DeleteAccount() {
+  const [open, setOpen] = useState(false);
+  const [confirm, setConfirm] = useState("");
+  const { refresh } = useAuth();
+  const [, navigate] = useLocation();
+  const remove = trpc.account.delete.useMutation({
+    onSuccess: async () => {
+      toast.success("Your account is gone.");
+      await refresh();
+      navigate("/");
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  return <div className="danger-zone">
+    <SectionLabel>CLOSING YOUR ACCOUNT</SectionLabel>
+    {!open
+      ? <>
+        <p className="muted">Deleting removes your account, your profile, your streak and your private receipts.</p>
+        <button className="button button-danger" onClick={() => setOpen(true)}>DELETE MY ACCOUNT</button>
+      </>
+      : <div className="danger-confirm">
+        <p>This cannot be undone. When you delete your account:</p>
+        <ul>
+          <li>Your account, profile, streak, and private receipts are deleted.</li>
+          <li>Your username is retired permanently — nobody can ever claim it, including you.</li>
+          <li><strong>Public receipts stay</strong>, permanently detached from you. Other people agreed, disagreed and wrote their own receipts after them, and that record is not yours alone to erase.</li>
+          <li>Those receipts show no name, no profile, and no link back to you.</li>
+          <li>Any of them still open can never be resolved, by you or anyone.</li>
+        </ul>
+        <label className="danger-label" htmlFor="delete-confirm">Type <code>DELETE MY ACCOUNT</code> to continue.</label>
+        <input id="delete-confirm" value={confirm} onChange={(event) => setConfirm(event.target.value)} placeholder="DELETE MY ACCOUNT" autoComplete="off" />
+        <div className="danger-actions">
+          <button
+            className="button button-danger"
+            disabled={confirm !== "DELETE MY ACCOUNT" || remove.isPending}
+            onClick={() => remove.mutate({ confirm: "DELETE MY ACCOUNT" })}
+          >{remove.isPending ? "DELETING…" : "DELETE PERMANENTLY"}</button>
+          <button className="button button-secondary" onClick={() => { setOpen(false); setConfirm(""); }}>CANCEL</button>
+        </div>
+      </div>}
+  </div>;
 }
 
 /**

@@ -21,6 +21,7 @@ import {
   type ReportReason,
   type ReportStatus,
 } from "@shared/moderation";
+import { USERNAME_UNAVAILABLE, normalizeUsername } from "@shared/accountDeletion";
 
 export const IS_STATIC_DEMO = import.meta.env.VITE_STATIC_DEMO === "true";
 
@@ -48,7 +49,8 @@ type DemoUser = {
 
 type DemoReceipt = {
   id: number;
-  userId: number;
+  /** Null once the author deletes their account, exactly as on the server. */
+  userId: number | null;
   prediction: string;
   category: string;
   confidence: number;
@@ -68,7 +70,7 @@ type DemoReceipt = {
 type DemoReport = {
   id: number;
   receiptId: number;
-  reporterId: number;
+  reporterId: number | null;
   reason: ReportReason;
   detail: string | null;
   status: ReportStatus;
@@ -80,7 +82,7 @@ type DemoReport = {
 type DemoModerationAction = {
   id: number;
   receiptId: number;
-  moderatorId: number;
+  moderatorId: number | null;
   action: ModerationAction;
   resultingStatus: ModerationStatus;
   note: string | null;
@@ -91,8 +93,8 @@ type DemoModerationAction = {
 type DemoChallenge = {
   id: number;
   receiptId: number;
-  challengerId: number;
-  challengedId: number;
+  challengerId: number | null;
+  challengedId: number | null;
   challengerPosition: string;
   challengerConfidence: number;
   challengedPosition: string | null;
@@ -131,6 +133,8 @@ type DemoState = {
   interactions: Record<string, InteractionType>;
   reports: DemoReport[];
   moderationActions: DemoModerationAction[];
+  /** Lower-cased handles of deleted accounts. Never reclaimable. */
+  retiredUsernames: string[];
   nextReceiptId: number;
   nextChallengeId: number;
   nextNotificationId: number;
@@ -150,6 +154,7 @@ const emptyState = (): DemoState => ({
   interactions: {},
   reports: [],
   moderationActions: [],
+  retiredUsernames: [],
   nextReceiptId: 4822,
   nextChallengeId: 1,
   nextNotificationId: 1,
@@ -473,6 +478,8 @@ const handlers: Record<string, Handler> = {
     const now = Date.now();
     return state.receipts
       .filter((receipt) => isPubliclyVisible(receipt) && ["PENDING", "LOCKED"].includes(receipt.status))
+      // Only the author can resolve one, so an author-less receipt never will be.
+      .filter((receipt) => receipt.userId !== null)
       .filter((receipt) => new Date(receipt.resolutionDate).getTime() >= now)
       .sort((a, b) => new Date(a.resolutionDate).getTime() - new Date(b.resolutionDate).getTime())
       .slice(0, limit)
@@ -643,12 +650,59 @@ const handlers: Record<string, Handler> = {
       receipts: receipts.slice(0, 12),
     };
   },
+  "account.delete": (input: { confirm: string }) =>
+    mutate((state) => {
+      const user = requireUser(state);
+      if (input.confirm !== "DELETE MY ACCOUNT") throw new Error("That account could not be deleted.");
+      // Private receipts go unless a challenge depends on them; public ones
+      // stay, detached. Mirrors deleteAccount() in server/db.ts.
+      const anchored = new Set(state.challenges.map((challenge) => challenge.receiptId));
+      const deletable = state.receipts
+        .filter((receipt) => receipt.userId === user.id && receipt.visibility === "PRIVATE" && !anchored.has(receipt.id))
+        .map((receipt) => receipt.id);
+      state.receipts = state.receipts.filter((receipt) => !deletable.includes(receipt.id));
+      for (const receipt of state.receipts) {
+        if (deletable.includes(receipt.derivedFromId ?? -1)) receipt.derivedFromId = null;
+        if (receipt.userId === user.id) receipt.userId = null;
+        if (receipt.challengeUserId === user.id) receipt.challengeUserId = null;
+      }
+      for (const challenge of state.challenges) {
+        if (challenge.challengerId === user.id) challenge.challengerId = null;
+        if (challenge.challengedId === user.id) challenge.challengedId = null;
+      }
+      for (const report of state.reports) {
+        if (report.reporterId === user.id) report.reporterId = null;
+        if (report.resolvedBy === user.id) report.resolvedBy = null;
+      }
+      for (const action of state.moderationActions) {
+        if (action.moderatorId === user.id) action.moderatorId = null;
+      }
+      state.notifications = state.notifications.filter(
+        (item) => item.userId !== user.id && item.actorId !== user.id,
+      );
+      state.dailyActivity = [];
+      state.interactions = {};
+      if (user.username) state.retiredUsernames.push(normalizeUsername(user.username));
+      state.user = null;
+      window.dispatchEvent(new Event(AUTH_CHANGE_EVENT));
+      return {
+        deletedPrivateReceipts: deletable.length,
+        anonymizedReceipts: state.receipts.filter((receipt) => receipt.userId === null).length,
+        usernameRetired: Boolean(user.username),
+      };
+    }),
+
   "profile.setUsername": (input: { username: string }) =>
     mutate((state) => {
       const user = requireUser(state);
       const username = input.username.trim();
       if (!/^[a-zA-Z0-9_]{3,24}$/.test(username)) {
         throw new Error("Usernames are 3-24 characters: letters, numbers, underscores.");
+      }
+      // A retired handle is never available again, not even to the person who
+      // had it. One message for taken and retired alike, as on the server.
+      if (state.retiredUsernames.includes(normalizeUsername(username))) {
+        throw new Error(USERNAME_UNAVAILABLE);
       }
       user.username = username;
       return { username };
@@ -681,15 +735,19 @@ const handlers: Record<string, Handler> = {
       challenge.challengedPosition = input.position.trim();
       challenge.challengedConfidence = input.confidence;
       challenge.status = "ACCEPTED";
-      notify(state, {
-        userId: challenge.challengerId,
-        type: "CHALLENGE_ACCEPTED",
-        title: "Your challenge was accepted.",
-        body: challenge.challengedPosition,
-        linkPath: `/challenge/${challenge.id}`,
-        actorId: challenge.challengedId,
-        challengeId: challenge.id,
-      });
+      // Nobody to tell if the challenger deleted their account, same as the
+      // server.
+      if (challenge.challengerId !== null) {
+        notify(state, {
+          userId: challenge.challengerId,
+          type: "CHALLENGE_ACCEPTED",
+          title: "Your challenge was accepted.",
+          body: challenge.challengedPosition,
+          linkPath: `/challenge/${challenge.id}`,
+          actorId: challenge.challengedId,
+          challengeId: challenge.id,
+        });
+      }
       state.events.push({ event: "challenge_accepted", properties: { challengeId: challenge.id, confidence: input.confidence }, at: new Date() });
       return {
         challenge,

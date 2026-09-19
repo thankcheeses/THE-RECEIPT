@@ -7,7 +7,7 @@ export const users = mysqlTable("users", {
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
-  username: varchar("username", { length: 40 }),
+  username: varchar("username", { length: 40 }).unique(),
   avatar: varchar("avatar", { length: 500 }),
   currentStreak: int("currentStreak").default(0).notNull(),
   longestStreak: int("longestStreak").default(0).notNull(),
@@ -39,7 +39,10 @@ export const receipts = mysqlTable(
   "receipts",
   {
     id: int("id").autoincrement().primaryKey(),
-    userId: int("userId").notNull(),
+    // Null once the author deletes their account. The Receipt survives for
+    // the people who responded to it; the thread back to a person does not.
+    // See shared/accountDeletion.ts.
+    userId: int("userId"),
     prediction: text("prediction").notNull(),
     category: varchar("category", { length: 32 }).notNull(),
     confidence: int("confidence").notNull(),
@@ -93,7 +96,9 @@ export const receiptInteractions = mysqlTable(
   {
     id: int("id").autoincrement().primaryKey(),
     receiptId: int("receiptId").notNull(),
-    userId: int("userId").notNull(),
+    // Null once the responder deletes their account. The response stays so the
+    // Receipt's counts do not silently drop; who made it does not.
+    userId: int("userId"),
     type: mysqlEnum("type", ["AGREE", "DISAGREE", "SUPPORT", "REACT"]).notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
@@ -121,7 +126,9 @@ export const receiptReports = mysqlTable(
   {
     id: int("id").autoincrement().primaryKey(),
     receiptId: int("receiptId").notNull(),
-    reporterId: int("reporterId").notNull(),
+    // Null once the reporter deletes their account; the report is evidence
+    // about somebody else's Receipt and outlives them.
+    reporterId: int("reporterId"),
     reason: mysqlEnum("reason", [
       "HARASSMENT",
       "HATE",
@@ -162,7 +169,9 @@ export const moderationActions = mysqlTable(
   {
     id: int("id").autoincrement().primaryKey(),
     receiptId: int("receiptId").notNull(),
-    moderatorId: int("moderatorId").notNull(),
+    // Null once the moderator deletes their account. The audit row stays —
+    // an admin closing their account must not erase the moderation history.
+    moderatorId: int("moderatorId"),
     action: mysqlEnum("action", ["HIDE", "RESTORE", "DISMISS"]).notNull(),
     /** The moderation status the Receipt was left in, for a readable history. */
     resultingStatus: mysqlEnum("resultingStatus", ["VISIBLE", "HIDDEN"]).notNull(),
@@ -177,14 +186,32 @@ export const moderationActions = mysqlTable(
 export const challenges = mysqlTable("challenges", {
   id: int("id").autoincrement().primaryKey(),
   receiptId: int("receiptId").notNull(),
-  challengerId: int("challengerId").notNull(),
-  challengedId: int("challengedId").notNull(),
+  // Either side goes null when that person deletes their account. The other
+  // side's position, confidence and words are theirs and stay.
+  challengerId: int("challengerId"),
+  challengedId: int("challengedId"),
   challengerPosition: text("challengerPosition").notNull(),
   challengerConfidence: int("challengerConfidence").notNull(),
   challengedPosition: text("challengedPosition"),
   challengedConfidence: int("challengedConfidence"),
   status: mysqlEnum("status", ["OPEN", "ACCEPTED", "RESOLVED"]).default("OPEN").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+/**
+ * Usernames that belonged to a deleted account and may never be claimed again.
+ *
+ * Releasing a handle would let somebody else answer to it: every old link,
+ * screenshot and shared card naming @nia would start pointing at a different
+ * person. This is a blocklist, not an identity — it stores no receipts, no
+ * ids and nothing that maps a name back to the content it once wrote, so it
+ * cannot be used to reconstruct the deleted account.
+ */
+export const retiredUsernames = mysqlTable("retiredUsernames", {
+  id: int("id").autoincrement().primaryKey(),
+  /** Stored lower-cased; see normalizeUsername in shared/accountDeletion.ts. */
+  username: varchar("username", { length: 40 }).notNull().unique(),
+  retiredAt: timestamp("retiredAt").defaultNow().notNull(),
 });
 
 export const achievements = mysqlTable("achievements", {
@@ -250,5 +277,6 @@ export type ReceiptInteraction = typeof receiptInteractions.$inferSelect;
 export type Notification = typeof notifications.$inferSelect;
 export type ReceiptReport = typeof receiptReports.$inferSelect;
 export type ModerationActionRow = typeof moderationActions.$inferSelect;
+export type RetiredUsername = typeof retiredUsernames.$inferSelect;
 export type DailyActivity = typeof dailyActivity.$inferSelect;
 export type AnalyticsEvent = typeof analyticsEvents.$inferSelect;
