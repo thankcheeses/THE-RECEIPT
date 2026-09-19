@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Added real streak calculation: `users.lastDailyDate` plus a `dailyActivity` table, advanced on each daily answer and idempotent per day.
+- Added daily retention tracking — `getRetentionSummary()` reports day-over-day active and returning users; `getDailyActivityWindow()` backs the per-user week view.
+- Replaced the daily page's hardcoded "0 DAYS" and static dots with the signed-in user's real streak and last seven days.
+- Added challenge acceptance: the challenged user locks their position from the challenge detail route, flipping the challenge to ACCEPTED.
+- Added in-app notifications with a header bell and unread badge, raised on challenge received and challenge accepted.
+- Added an append-only `analyticsEvents` table and a closed event vocabulary covering signup, daily answers, receipt creation, sharing, and resolution.
+- Added an admin-only `analytics.summary` procedure returning 30-day event totals and 14-day retention.
+- Extended the GitHub Pages static demo to cover every new procedure, so the published build keeps working without a server.
+
 ## 1.0.0 — MVP baseline
 
 - Established THE RECEIPT as a social prediction game centered on immutable thermal-paper receipt artifacts.

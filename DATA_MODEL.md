@@ -13,7 +13,8 @@ Stores Manus OAuth identity plus product profile aggregates.
 | `name`, `email`, `loginMethod` | nullable text/varchar | Auth-provided identity fields |
 | `role` | enum | `user` or `admin` |
 | `username`, `avatar` | nullable varchar | Product profile identity |
-| `currentStreak`, `longestStreak`, `accuracy` | int | Product aggregates; streak rollups are not fully implemented |
+| `currentStreak`, `longestStreak`, `accuracy` | int | Product aggregates, maintained on every daily answer and resolution |
+| `lastDailyDate` | nullable timestamp | Midnight of the last answered daily; the streak gap is measured from here |
 | `createdAt`, `updatedAt`, `lastSignedIn` | timestamp | Account lifecycle timestamps |
 
 ## dailyChallenges
@@ -44,7 +45,35 @@ There is intentionally no edit procedure. Receipt creation is the immutability b
 
 ## challenges
 
-Stores a head-to-head relationship: receipt, challenger, challenged user, both positions and confidences, status OPEN/ACCEPTED/RESOLVED, and creation timestamp. The current UI renders the list/detail path; server response mutation exists, while full acceptance and resolution UI remain roadmap work.
+Stores a head-to-head relationship: receipt, challenger, challenged user, both positions and confidences, status OPEN/ACCEPTED/RESOLVED, and creation timestamp. The challenged user accepts from the challenge detail route, which locks their position and flips the status to ACCEPTED. Joint resolution remains roadmap work.
+
+## dailyActivity
+
+One row per user per day they answered the daily challenge, with the streak value that answer produced.
+
+| Field | Meaning |
+| --- | --- |
+| `userId` | Answering user |
+| `activityDate` | Midnight of the day answered; unique per user |
+| `dailyChallengeId`, `receiptId` | What was answered, and the receipt it produced |
+| `streakAfter` | Streak value after this answer, so history survives later resets |
+
+Streaks could be derived from `receipts` alone. This table exists so retention — how many of one day's answerers return the next — is a day-grained query rather than a scan over every receipt.
+
+## notifications
+
+| Field | Meaning |
+| --- | --- |
+| `userId` | Recipient |
+| `type` | CHALLENGE_RECEIVED, CHALLENGE_ACCEPTED, or RECEIPT_RESOLVED |
+| `title`, `body` | Rendered directly in the header panel |
+| `linkPath` | In-app destination for the notification |
+| `actorId`, `challengeId` | Who caused it, and what it refers to |
+| `readAt` | Null until read; drives the unread badge |
+
+## analyticsEvents
+
+Append-only product analytics: `event` (from the closed `ANALYTICS_EVENTS` list in `server/routers.ts`), optional `userId`, JSON `properties`, and `createdAt`. Writes never throw into a request path — a failed write costs a data point, not the user's action. The table holds no PII beyond the user id, so it can be dropped or exported without touching application tables.
 
 ## achievements
 
@@ -58,3 +87,7 @@ Stores user, achievement type, and earned timestamp. Current code records basic 
 - Only the owner may resolve a receipt.
 - Public detail requires `visibility = PUBLIC`.
 - Resolution updates status, optional result note, resolved timestamp, and the current simple accuracy aggregate.
+- A daily answer also records a `dailyActivity` row and advances the streak. Both are idempotent per day: answering twice does not double-count.
+- A streak continues when the previous answer was yesterday, holds when it was today, and resets to 1 otherwise.
+- Creating a challenge notifies the challenged user; accepting notifies the challenger.
+- Analytics events are written server-side wherever the server can observe the action; only `receipt_shared` is reported by the client, because sharing happens entirely in the browser.

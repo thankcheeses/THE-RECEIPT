@@ -1,4 +1,4 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar } from "drizzle-orm/mysql-core";
+import { int, mysqlEnum, mysqlTable, text, timestamp, uniqueIndex, varchar } from "drizzle-orm/mysql-core";
 
 export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),
@@ -11,6 +11,10 @@ export const users = mysqlTable("users", {
   avatar: varchar("avatar", { length: 500 }),
   currentStreak: int("currentStreak").default(0).notNull(),
   longestStreak: int("longestStreak").default(0).notNull(),
+  // Midnight of the day the user last answered a daily challenge. Streaks are
+  // derived from the gap between this and today, so they survive restarts and
+  // never need a backfill job.
+  lastDailyDate: timestamp("lastDailyDate"),
   accuracy: int("accuracy").default(0).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -63,9 +67,58 @@ export const achievements = mysqlTable("achievements", {
   earnedAt: timestamp("earnedAt").defaultNow().notNull(),
 });
 
+/**
+ * One row per user per day they answered the daily challenge. Streaks could be
+ * derived from `receipts` alone, but a dedicated day-grained table is what makes
+ * retention (how many of Monday's answerers came back Tuesday) a cheap query
+ * instead of a scan over every receipt.
+ */
+export const dailyActivity = mysqlTable(
+  "dailyActivity",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    activityDate: timestamp("activityDate").notNull(),
+    dailyChallengeId: int("dailyChallengeId"),
+    receiptId: int("receiptId"),
+    streakAfter: int("streakAfter").default(0).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex("dailyActivity_user_date").on(table.userId, table.activityDate)],
+);
+
+/** In-app notifications. Currently driven by challenge create/accept. */
+export const notifications = mysqlTable("notifications", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  type: mysqlEnum("type", ["CHALLENGE_RECEIVED", "CHALLENGE_ACCEPTED", "RECEIPT_RESOLVED"]).notNull(),
+  title: varchar("title", { length: 160 }).notNull(),
+  body: text("body"),
+  linkPath: varchar("linkPath", { length: 200 }),
+  actorId: int("actorId"),
+  challengeId: int("challengeId"),
+  readAt: timestamp("readAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+/**
+ * Product analytics. Deliberately append-only and free of PII beyond the user
+ * id, so it can be dropped or exported without touching application tables.
+ */
+export const analyticsEvents = mysqlTable("analyticsEvents", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId"),
+  event: varchar("event", { length: 64 }).notNull(),
+  properties: text("properties"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 export type Receipt = typeof receipts.$inferSelect;
 export type InsertReceipt = typeof receipts.$inferInsert;
 export type DailyChallenge = typeof dailyChallenges.$inferSelect;
 export type Challenge = typeof challenges.$inferSelect;
+export type Notification = typeof notifications.$inferSelect;
+export type DailyActivity = typeof dailyActivity.$inferSelect;
+export type AnalyticsEvent = typeof analyticsEvents.$inferSelect;

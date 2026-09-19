@@ -2,7 +2,7 @@ import { startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 import { DEMO_RECEIPTS, CATEGORIES, type Category } from "@shared/seed";
-import { ArrowRight, BarChart3, Check, ChevronRight, Clock3, Copy, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, Sparkles, Target, Trophy, UserRound, X, Zap } from "lucide-react";
+import { ArrowRight, BarChart3, Bell, Check, ChevronRight, Clock3, Copy, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, Sparkles, Target, Trophy, UserRound, X, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Link, Route, Router as WouterRouter, Switch, useLocation, useRoute } from "wouter";
 import { Toaster } from "@/components/ui/sonner";
@@ -13,6 +13,38 @@ import { ThemeProvider } from "./contexts/ThemeContext";
 const dateLabel = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
 const shortDate = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" }) : "—";
 const statusClass = (status: string) => status === "RIGHT" ? "status-right" : status === "WRONG" ? "status-wrong" : status === "PARTIALLY RIGHT" ? "status-partial" : status === "TOO EARLY" ? "status-early" : "status-pending";
+
+/** Bell + unread count. Renders nothing for signed-out visitors. */
+function NotificationBell() {
+  const { isAuthenticated } = useAuth();
+  const [open, setOpen] = useState(false);
+  const utils = trpc.useUtils();
+  const { data: unread } = trpc.notifications.unreadCount.useQuery(undefined, { enabled: isAuthenticated, refetchInterval: 60_000 });
+  const { data: items } = trpc.notifications.list.useQuery(undefined, { enabled: isAuthenticated && open });
+  const markRead = trpc.notifications.markRead.useMutation({
+    onSuccess: () => { utils.notifications.unreadCount.invalidate(); utils.notifications.list.invalidate(); },
+  });
+  if (!isAuthenticated) return null;
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && unread) markRead.mutate({});
+  };
+  return <div className="notif-wrap">
+    <button className="notif-button" onClick={toggle} aria-label={`Notifications${unread ? ` (${unread} unread)` : ""}`}>
+      <Bell size={18} />
+      {Boolean(unread) && <span className="notif-badge">{unread! > 9 ? "9+" : unread}</span>}
+    </button>
+    {open && <div className="notif-panel">
+      <div className="notif-panel-head"><span>NOTIFICATIONS</span><button onClick={() => setOpen(false)} aria-label="Close notifications"><X size={14} /></button></div>
+      {items?.length ? items.map((item) => <Link key={item.id} href={item.linkPath || "/"} onClick={() => setOpen(false)} className={`notif-item ${item.readAt ? "" : "unread"}`}>
+        <strong>{item.title}</strong>
+        {item.body && <span>{item.body}</span>}
+        <small>{dateLabel(item.createdAt)}</small>
+      </Link>) : <div className="notif-empty">Nothing yet. Challenge someone and it starts here.</div>}
+    </div>}
+  </div>;
+}
 
 function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -28,6 +60,7 @@ function Header() {
       {isAuthenticated && <Link href="/profile" onClick={() => setMenuOpen(false)}>{user?.name || "Profile"}</Link>}
     </nav>
     <div className="header-actions">
+      <NotificationBell />
       {isAuthenticated ? <button className="avatar-button" onClick={() => navigate("/profile")} aria-label="Open profile">{(user?.name || "R").slice(0, 1).toUpperCase()}</button> : <button className="button button-ghost button-small" onClick={() => startLogin()}>SIGN IN</button>}
       <button className="menu-button" onClick={() => setMenuOpen((value) => !value)} aria-label="Toggle menu"><Menu size={20} /></button>
     </div>
@@ -74,17 +107,40 @@ function Home() {
   </Page>;
 }
 
+/**
+ * Streak panel on the daily page. Signed-out visitors see the pitch; signed-in
+ * ones see their real run and which of the last seven days they answered.
+ */
+function StreakAside({ status, isAuthenticated }: { status?: { currentStreak: number; longestStreak: number; week: Array<{ date: Date | string; active: boolean }> } | null; isAuthenticated: boolean }) {
+  const current = status?.currentStreak ?? 0;
+  const week = status?.week ?? Array.from({ length: 7 }, () => ({ date: "", active: false }));
+  return <aside className="daily-aside">
+    <div className="aside-icon"><Flame size={22} /></div>
+    <span className="eyebrow">YOUR STREAK</span>
+    <strong>{current} {current === 1 ? "DAY" : "DAYS"}</strong>
+    <p>{!isAuthenticated
+      ? "Sign in to start a streak. Answer daily to keep it alive."
+      : current === 0
+        ? "Answer today to start your streak. Come back tomorrow to keep it alive."
+        : `Longest run: ${status?.longestStreak ?? current} ${(status?.longestStreak ?? current) === 1 ? "day" : "days"}. Miss a day and it resets.`}</p>
+    <div className="streak-dots">{week.map((day, index) => <i key={index} className={day.active ? "active" : ""} />)}</div>
+    <span className="muted">LAST 7 DAYS</span>
+  </aside>;
+}
+
 function Daily() {
   const { data: daily, isLoading } = trpc.daily.get.useQuery();
   const { isAuthenticated } = useAuth();
+  const utils = trpc.useUtils();
+  const { data: status } = trpc.daily.status.useQuery(undefined, { enabled: isAuthenticated });
   const [answer, setAnswer] = useState<"YES" | "NO" | null>(null);
   const [confidence, setConfidence] = useState(70);
   const [lockedReceipt, setLockedReceipt] = useState<any>(null);
   const [, navigate] = useLocation();
-  const mutation = trpc.daily.answer.useMutation({ onSuccess: (receipt) => { setLockedReceipt(receipt); toast.success("Receipt locked. No takebacks."); } });
+  const mutation = trpc.daily.answer.useMutation({ onSuccess: (receipt) => { setLockedReceipt(receipt); utils.daily.status.invalidate(); toast.success("Receipt locked. No takebacks."); } });
   const submit = () => { if (!answer) return; if (!isAuthenticated) return startLogin(); if (daily) mutation.mutate({ answer, confidence }); };
   if (lockedReceipt) return <Page eyebrow="DAILY RECEIPT" title="It’s on the record." description="Your answer is locked. The future can do what it wants now."><div className="locked-layout"><div><div className="success-lock"><LockKeyhole size={18} /> RECEIPT LOCKED</div><ReceiptPaper receipt={{ ...lockedReceipt, receiptNumber: String(lockedReceipt.id).padStart(6, "0") }} /><div className="inline-success">Locked successfully. Your future self will deal with this.</div></div><div className="side-note"><span className="eyebrow">YOUR CALL</span><h3>{answer} at {confidence}%.</h3><p>Share the receipt or keep it private. Either way, the timestamp is doing its job.</p><ButtonLink href={`/receipt/${lockedReceipt.id}`}>VIEW RECEIPT</ButtonLink><ButtonLink href="/create" variant="secondary">MAKE ANOTHER</ButtonLink></div></div></Page>;
-  return <Page eyebrow="DAILY RECEIPT · EVERY DAY, ONE QUESTION" title="What’s your call?" description="One prompt. One answer. No edits after you lock it."><div className="daily-layout"><div className="daily-card"><div className="daily-card-top"><Tag dark>{daily?.category || "LOADING"}</Tag><span className="daily-date">TODAY · #00{daily?.id || "—"}</span></div><div className="daily-question">{isLoading ? "Loading today’s question…" : `“${daily?.prompt}”`}</div><div className="answer-row"><button className={`answer-button ${answer === "YES" ? "selected yes" : ""}`} onClick={() => setAnswer("YES")}><span>YES</span><Check size={20} /></button><button className={`answer-button ${answer === "NO" ? "selected no" : ""}`} onClick={() => setAnswer("NO")}><span>NO</span><X size={20} /></button></div><div className="confidence-block"><div className="confidence-head"><span>HOW CONFIDENT ARE YOU?</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>WILD GUESS</span><span>LOCKED IN</span></div></div><div className="lock-action"><button className="button button-dark button-wide" disabled={!answer || mutation.isPending} onClick={submit}><LockKeyhole size={17} /> {mutation.isPending ? "PRINTING…" : "LOCK IT IN"}</button><span>Once printed, it can’t be edited.</span></div>{mutation.error && <div className="error-message">{mutation.error.message}</div>}</div><aside className="daily-aside"><div className="aside-icon"><Flame size={22} /></div><span className="eyebrow">YOUR STREAK</span><strong>0 DAYS</strong><p>Answer today to start your streak. Come back tomorrow to keep it alive.</p><div className="streak-dots"><i className="active" /><i /><i /><i /><i /><i /><i /></div><span className="muted">NEW RECEIPT IN 23:41:08</span></aside></div></Page>;
+  return <Page eyebrow="DAILY RECEIPT · EVERY DAY, ONE QUESTION" title="What’s your call?" description="One prompt. One answer. No edits after you lock it."><div className="daily-layout"><div className="daily-card"><div className="daily-card-top"><Tag dark>{daily?.category || "LOADING"}</Tag><span className="daily-date">TODAY · #00{daily?.id || "—"}</span></div><div className="daily-question">{isLoading ? "Loading today’s question…" : `“${daily?.prompt}”`}</div><div className="answer-row"><button className={`answer-button ${answer === "YES" ? "selected yes" : ""}`} onClick={() => setAnswer("YES")}><span>YES</span><Check size={20} /></button><button className={`answer-button ${answer === "NO" ? "selected no" : ""}`} onClick={() => setAnswer("NO")}><span>NO</span><X size={20} /></button></div><div className="confidence-block"><div className="confidence-head"><span>HOW CONFIDENT ARE YOU?</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>WILD GUESS</span><span>LOCKED IN</span></div></div><div className="lock-action"><button className="button button-dark button-wide" disabled={!answer || mutation.isPending} onClick={submit}><LockKeyhole size={17} /> {mutation.isPending ? "PRINTING…" : "LOCK IT IN"}</button><span>Once printed, it can’t be edited.</span></div>{mutation.error && <div className="error-message">{mutation.error.message}</div>}</div><StreakAside status={status} isAuthenticated={isAuthenticated} /></div></Page>;
 }
 
 function Create() {
@@ -113,8 +169,22 @@ function ReceiptDetail() {
   const receipt = isPublic ? query.data?.receipt : mineQuery.data?.find((item) => item.id === id);
   const user = isPublic ? query.data?.user : undefined;
   const resolveMutation = trpc.receipts.resolve.useMutation({ onSuccess: () => { toast.success("Result recorded."); mineQuery.refetch(); } });
-  const copy = async () => { await navigator.clipboard?.writeText(window.location.href); toast.success("Receipt link copied."); };
-  const share = async () => { if (navigator.share) await navigator.share({ title: "THE RECEIPT", text: "Put it on the record.", url: window.location.href }); else await copy(); };
+  // Sharing happens entirely in the browser, so it is the one event the server
+  // cannot observe on its own.
+  const track = trpc.analytics.track.useMutation();
+  const copy = async () => {
+    await navigator.clipboard?.writeText(window.location.href);
+    track.mutate({ event: "receipt_shared", properties: { receiptId: id, method: "copy", surface: isPublic ? "public" : "owner" } });
+    toast.success("Receipt link copied.");
+  };
+  const share = async () => {
+    if (navigator.share) {
+      await navigator.share({ title: "THE RECEIPT", text: "Put it on the record.", url: window.location.href });
+      track.mutate({ event: "receipt_shared", properties: { receiptId: id, method: "web-share", surface: isPublic ? "public" : "owner" } });
+    } else {
+      await copy();
+    }
+  };
   return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><div className="detail-actions"><button className="button button-dark" onClick={copy}><Copy size={16} /> COPY RECEIPT LINK</button><button className="button button-secondary" onClick={share}><Share2 size={16} /> SHARE</button></div>{!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && <div className="resolve-box"><div><span className="eyebrow">TIME TO FACE THE MUSIC?</span><h3>How did it go?</h3></div><div className="resolve-actions"><button onClick={() => resolveMutation.mutate({ id, result: "RIGHT" })} className="result-button right">RIGHT</button><button onClick={() => resolveMutation.mutate({ id, result: "PARTIALLY RIGHT" })} className="result-button partial">PARTIAL</button><button onClick={() => resolveMutation.mutate({ id, result: "WRONG" })} className="result-button wrong">WRONG</button><button onClick={() => resolveMutation.mutate({ id, result: "TOO EARLY" })} className="result-button early">TOO EARLY</button></div></div>}</div><aside className="detail-aside"><div className="share-hook"><Sparkles size={20} /><span className="eyebrow">YOUR TURN</span><h3>What do <em>you</em> think will happen?</h3><ButtonLink href="/create">MAKE YOUR RECEIPT</ButtonLink></div><div className="detail-meta"><span>RECEIPT DETAILS</span><dl><dt>CREATOR</dt><dd>{user?.username || user?.name || "You"}</dd><dt>STATUS</dt><dd className={statusClass(receipt.status)}>{receipt.status}</dd><dt>CONFIDENCE</dt><dd>{receipt.confidence}%</dd><dt>RESOLVES</dt><dd>{dateLabel(receipt.resolutionDate)}</dd></dl></div></aside></> : <div className="empty-state"><ReceiptText size={34} /><h3>That receipt is missing.</h3><p>It may be private, or the number may have been typed with too much confidence.</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}</div></Page>;
 }
 
@@ -135,8 +205,31 @@ function Challenges() {
 function ChallengeDetail() {
   const [, params] = useRoute("/challenge/:id");
   const id = Number(params?.id);
+  const { user, isAuthenticated } = useAuth();
+  const utils = trpc.useUtils();
   const { data: item } = trpc.challenges.get.useQuery({ id }, { enabled: Number.isFinite(id) });
-  return <Page eyebrow="HEAD-TO-HEAD" title="The challenge is on." description="Two positions. One future. No deleting the evidence."><div className="head-to-head">{item ? <><div className="position-card primary-position"><span className="eyebrow">CHALLENGER</span><div className="position-confidence">{item.challenge.challengerConfidence}%</div><p>“{item.challenge.challengerPosition}”</p><Tag dark>{item.challenge.status}</Tag></div><div className="versus">VS</div><div className="position-card"><span className="eyebrow">CHALLENGED</span><div className="position-confidence">{item.challenge.challengedConfidence ?? "—"}<span>{item.challenge.challengedConfidence ? "%" : ""}</span></div><p>{item.challenge.challengedPosition ? `“${item.challenge.challengedPosition}”` : "Waiting for their receipt…"}</p><Tag>{item.challenge.challengedPosition ? "LOCKED" : "OPEN"}</Tag></div></> : <div className="loading-state">Loading challenge…</div>}</div></Page>;
+  const [position, setPosition] = useState("");
+  const [confidence, setConfidence] = useState(70);
+  const respond = trpc.challenges.respond.useMutation({
+    onSuccess: () => {
+      utils.challenges.get.invalidate({ id });
+      utils.challenges.list.invalidate();
+      utils.notifications.unreadCount.invalidate();
+      toast.success("Your side is on the record.");
+    },
+  });
+  // Only the challenged user, and only while it is still open.
+  const canRespond = Boolean(item && isAuthenticated && user?.id === item.challenge.challengedId && item.challenge.status === "OPEN");
+  return <Page eyebrow="HEAD-TO-HEAD" title="The challenge is on." description="Two positions. One future. No deleting the evidence.">
+    <div className="head-to-head">{item ? <><div className="position-card primary-position"><span className="eyebrow">CHALLENGER</span><div className="position-confidence">{item.challenge.challengerConfidence}%</div><p>“{item.challenge.challengerPosition}”</p><Tag dark>{item.challenge.status}</Tag></div><div className="versus">VS</div><div className="position-card"><span className="eyebrow">CHALLENGED</span><div className="position-confidence">{item.challenge.challengedConfidence ?? "—"}<span>{item.challenge.challengedConfidence ? "%" : ""}</span></div><p>{item.challenge.challengedPosition ? `“${item.challenge.challengedPosition}”` : "Waiting for their receipt…"}</p><Tag>{item.challenge.challengedPosition ? "LOCKED" : "OPEN"}</Tag></div></> : <div className="loading-state">Loading challenge…</div>}</div>
+    {canRespond && <div className="respond-box">
+      <div><span className="eyebrow">YOUR MOVE</span><h3>Take the other side.</h3><p className="muted">Say where you stand. Once you lock it, both receipts are permanent.</p></div>
+      <label className="field-label">YOUR POSITION<textarea value={position} onChange={(event) => setPosition(event.target.value)} maxLength={280} rows={3} placeholder="I think…" /><span className="char-count">{position.length}/280</span></label>
+      <div className="confidence-block"><div className="confidence-head"><span>HOW CONFIDENT?</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>VIBES</span><span>ABSOLUTE FACT (TO ME)</span></div></div>
+      <button className="button button-dark button-wide" disabled={position.trim().length < 8 || respond.isPending} onClick={() => respond.mutate({ id, position, confidence })}><LockKeyhole size={17} /> {respond.isPending ? "PRINTING…" : "ACCEPT THE CHALLENGE"}</button>
+      {respond.error && <div className="error-message">{respond.error.message}</div>}
+    </div>}
+  </Page>;
 }
 
 function Leaderboard() {

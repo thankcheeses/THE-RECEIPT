@@ -1,6 +1,6 @@
-import { and, desc, eq, gte, isNull, lte, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, receipts, dailyChallenges, challenges, achievements } from "../drizzle/schema";
+import { InsertUser, users, receipts, dailyChallenges, challenges, achievements, dailyActivity, notifications, analyticsEvents } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -43,7 +43,15 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   }
   values.lastSignedIn ??= new Date();
   if (!Object.keys(updateSet).length) updateSet.lastSignedIn = new Date();
+  // Checked before the upsert so `signup` fires once, on the real first
+  // sign-in, rather than on every subsequent one. Tracking it here covers all
+  // three call sites (OAuth callback and both SDK paths) in one place.
+  const isNewUser = !(await getUserByOpenId(user.openId));
   await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
+  if (isNewUser) {
+    const created = await getUserByOpenId(user.openId);
+    await trackEvent("signup", created?.id ?? null, { loginMethod: user.loginMethod ?? null });
+  }
 }
 
 export async function getUserByOpenId(openId: string) {
@@ -135,6 +143,207 @@ export async function getProfileStats(userId: number) {
   const misses = resolved.filter((r) => r.status === "WRONG").sort((a, b) => b.confidence - a.confidence);
   const calls = right.slice().sort((a, b) => b.confidence - a.confidence);
   return { total: all.length, resolved: resolved.length, accuracy, right: right.length, pending: all.length - resolved.length, biggestMiss: misses[0] ?? null, biggestCall: calls[0] ?? null, byCategory };
+}
+
+// ---------------------------------------------------------------------------
+// Streaks & daily retention
+// ---------------------------------------------------------------------------
+
+/** Midnight local time for `date`, the grain every streak/retention query uses. */
+export function startOfDay(date: Date) {
+  const day = new Date(date);
+  day.setHours(0, 0, 0, 0);
+  return day;
+}
+
+const DAY_MS = 86_400_000;
+
+/** Whole days between two midnights. */
+export function daysBetween(from: Date, to: Date) {
+  return Math.round((startOfDay(to).getTime() - startOfDay(from).getTime()) / DAY_MS);
+}
+
+/**
+ * Next streak value for a user answering today.
+ *
+ * Yesterday continues the run, today is a no-op (answering twice must not
+ * double-count), anything older — or a first answer — starts over at 1.
+ */
+export function nextStreak(current: number, lastDailyDate: Date | null | undefined, today: Date) {
+  if (!lastDailyDate) return 1;
+  const gap = daysBetween(lastDailyDate, today);
+  if (gap === 0) return Math.max(current, 1);
+  if (gap === 1) return current + 1;
+  return 1;
+}
+
+/**
+ * Records that `userId` answered today's daily and advances their streak.
+ * Idempotent per day: a second call the same day returns the stored streak.
+ */
+export async function recordDailyActivity(userId: number, dailyChallengeId: number | null, receiptId: number | null) {
+  const db = await getDb();
+  if (!db) return { currentStreak: 0, longestStreak: 0 };
+  const today = startOfDay(new Date());
+  const user = await getUserById(userId);
+  if (!user) return { currentStreak: 0, longestStreak: 0 };
+
+  const existing = await db
+    .select()
+    .from(dailyActivity)
+    .where(and(eq(dailyActivity.userId, userId), eq(dailyActivity.activityDate, today)))
+    .limit(1);
+  if (existing[0]) return { currentStreak: user.currentStreak, longestStreak: user.longestStreak };
+
+  const currentStreak = nextStreak(user.currentStreak, user.lastDailyDate, today);
+  const longestStreak = Math.max(user.longestStreak, currentStreak);
+  await db.insert(dailyActivity).values({ userId, activityDate: today, dailyChallengeId, receiptId, streakAfter: currentStreak });
+  await db.update(users).set({ currentStreak, longestStreak, lastDailyDate: today }).where(eq(users.id, userId));
+  return { currentStreak, longestStreak };
+}
+
+/**
+ * Which of the last `days` days the user answered, oldest first. Drives the
+ * streak dots and is the per-user half of retention.
+ */
+export async function getDailyActivityWindow(userId: number, days = 7) {
+  const db = await getDb();
+  const today = startOfDay(new Date());
+  const window = Array.from({ length: days }, (_, index) => {
+    const date = new Date(today);
+    date.setDate(date.getDate() - (days - 1 - index));
+    return date;
+  });
+  if (!db) return window.map((date) => ({ date, active: false }));
+  const since = window[0];
+  const rows = await db
+    .select({ activityDate: dailyActivity.activityDate })
+    .from(dailyActivity)
+    .where(and(eq(dailyActivity.userId, userId), gte(dailyActivity.activityDate, since)));
+  const active = new Set(rows.map((row) => startOfDay(row.activityDate).getTime()));
+  return window.map((date) => ({ date, active: active.has(date.getTime()) }));
+}
+
+/**
+ * Day-over-day retention across all users: for each of the last `days` days,
+ * how many answered, and how many of them also answered the day before.
+ */
+export async function getRetentionSummary(days = 14) {
+  const db = await getDb();
+  if (!db) return [];
+  const today = startOfDay(new Date());
+  const since = new Date(today);
+  since.setDate(since.getDate() - days);
+  const rows = await db
+    .select({ userId: dailyActivity.userId, activityDate: dailyActivity.activityDate })
+    .from(dailyActivity)
+    .where(gte(dailyActivity.activityDate, since));
+
+  const byDay = new Map<number, Set<number>>();
+  for (const row of rows) {
+    const key = startOfDay(row.activityDate).getTime();
+    if (!byDay.has(key)) byDay.set(key, new Set());
+    byDay.get(key)!.add(row.userId);
+  }
+  return Array.from({ length: days }, (_, index) => {
+    const date = new Date(today);
+    date.setDate(date.getDate() - (days - 1 - index));
+    const actives = byDay.get(date.getTime()) ?? new Set<number>();
+    const previous = byDay.get(date.getTime() - DAY_MS) ?? new Set<number>();
+    const returning = Array.from(actives).filter((userId) => previous.has(userId)).length;
+    return {
+      date,
+      active: actives.size,
+      returning,
+      retention: previous.size ? Math.round((returning / previous.size) * 100) : 0,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+export async function createNotification(input: {
+  userId: number;
+  type: "CHALLENGE_RECEIVED" | "CHALLENGE_ACCEPTED" | "RECEIPT_RESOLVED";
+  title: string;
+  body?: string | null;
+  linkPath?: string | null;
+  actorId?: number | null;
+  challengeId?: number | null;
+}) {
+  const db = await getDb();
+  if (!db) return;
+  await db.insert(notifications).values({
+    userId: input.userId,
+    type: input.type,
+    title: input.title,
+    body: input.body ?? null,
+    linkPath: input.linkPath ?? null,
+    actorId: input.actorId ?? null,
+    challengeId: input.challengeId ?? null,
+  });
+}
+
+export async function listNotifications(userId: number, limit = 25) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(notifications).where(eq(notifications.userId, userId)).orderBy(desc(notifications.createdAt)).limit(limit);
+}
+
+export async function countUnreadNotifications(userId: number) {
+  const db = await getDb();
+  if (!db) return 0;
+  const result = await db
+    .select({ value: count() })
+    .from(notifications)
+    .where(and(eq(notifications.userId, userId), isNull(notifications.readAt)));
+  return Number(result[0]?.value ?? 0);
+}
+
+export async function markNotificationsRead(userId: number, ids?: number[]) {
+  const db = await getDb();
+  if (!db) return;
+  const unread = and(eq(notifications.userId, userId), isNull(notifications.readAt));
+  await db
+    .update(notifications)
+    .set({ readAt: new Date() })
+    .where(ids?.length ? and(unread, inArray(notifications.id, ids)) : unread);
+}
+
+// ---------------------------------------------------------------------------
+// Analytics
+// ---------------------------------------------------------------------------
+
+/**
+ * Appends a product analytics event. Never throws into a request path: a
+ * failed write should cost a data point, not the user's action.
+ */
+export async function trackEvent(event: string, userId: number | null, properties?: Record<string, unknown>) {
+  try {
+    const db = await getDb();
+    if (!db) return;
+    await db.insert(analyticsEvents).values({
+      event,
+      userId,
+      properties: properties ? JSON.stringify(properties) : null,
+    });
+  } catch (error) {
+    console.warn("[Analytics] Failed to record event:", event, error);
+  }
+}
+
+export async function getEventTotals(days = 30) {
+  const db = await getDb();
+  if (!db) return [];
+  const since = startOfDay(new Date());
+  since.setDate(since.getDate() - days);
+  return db
+    .select({ event: analyticsEvents.event, total: count() })
+    .from(analyticsEvents)
+    .where(gte(analyticsEvents.createdAt, since))
+    .groupBy(analyticsEvents.event);
 }
 
 export async function recordAchievement(userId: number, achievementType: string) {
