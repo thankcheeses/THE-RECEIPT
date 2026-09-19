@@ -27,6 +27,7 @@ type DemoUser = {
   avatar: string | null;
   currentStreak: number;
   longestStreak: number;
+  lastDailyDate: Date | null;
   accuracy: number;
   createdAt: Date;
   updatedAt: Date;
@@ -62,12 +63,35 @@ type DemoChallenge = {
   createdAt: Date;
 };
 
+type DemoNotification = {
+  id: number;
+  userId: number;
+  type: "CHALLENGE_RECEIVED" | "CHALLENGE_ACCEPTED" | "RECEIPT_RESOLVED";
+  title: string;
+  body: string | null;
+  linkPath: string | null;
+  actorId: number | null;
+  challengeId: number | null;
+  readAt: Date | null;
+  createdAt: Date;
+};
+
 type DemoState = {
   user: DemoUser | null;
   receipts: DemoReceipt[];
   challenges: DemoChallenge[];
+  notifications: DemoNotification[];
+  /**
+   * Days the demo user answered the daily, as `YYYY-MM-DD`. Deliberately not a
+   * full ISO timestamp: reviveDates() turns those back into Date objects on
+   * reload, which would break every lookup against this set.
+   */
+  dailyActivity: string[];
+  /** Locally recorded analytics, so the event calls are exercised, not swallowed. */
+  events: Array<{ event: string; properties: unknown; at: Date }>;
   nextReceiptId: number;
   nextChallengeId: number;
+  nextNotificationId: number;
 };
 
 const RESOLVED_STATUSES: ReceiptStatus[] = ["RIGHT", "WRONG", "PARTIALLY RIGHT"];
@@ -76,8 +100,12 @@ const emptyState = (): DemoState => ({
   user: null,
   receipts: [],
   challenges: [],
+  notifications: [],
+  dailyActivity: [],
+  events: [],
   nextReceiptId: 4822,
   nextChallengeId: 1,
+  nextNotificationId: 1,
 });
 
 /** JSON has no Date type, so ISO strings are revived on read. */
@@ -141,6 +169,7 @@ export const startDemoLogin = () => {
         avatar: null,
         currentStreak: 0,
         longestStreak: 0,
+        lastDailyDate: null,
         accuracy: 0,
         createdAt: now,
         updatedAt: now,
@@ -175,6 +204,43 @@ const dailyChallenge = () => {
     status: "OPEN" as const,
     createdAt: publishDate,
   };
+};
+
+const DAY_MS = 86_400_000;
+
+const startOfDay = (date: Date) => {
+  const day = new Date(date);
+  day.setHours(0, 0, 0, 0);
+  return day;
+};
+
+/** The `YYYY-MM-DD` key a Date falls on, in local time. */
+const dayKey = (date: Date) => {
+  const day = startOfDay(date);
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+};
+
+/** Mirrors nextStreak() in server/db.ts: yesterday continues, today is a no-op. */
+const nextStreak = (current: number, lastDailyDate: Date | null, today: Date) => {
+  if (!lastDailyDate) return 1;
+  const gap = Math.round((startOfDay(today).getTime() - startOfDay(lastDailyDate).getTime()) / DAY_MS);
+  if (gap === 0) return Math.max(current, 1);
+  if (gap === 1) return current + 1;
+  return 1;
+};
+
+const activityWindow = (state: DemoState, days = 7) => {
+  const today = startOfDay(new Date());
+  const active = new Set(state.dailyActivity);
+  return Array.from({ length: days }, (_, index) => {
+    const date = new Date(today);
+    date.setDate(date.getDate() - (days - 1 - index));
+    return { date, active: active.has(dayKey(date)) };
+  });
+};
+
+const notify = (state: DemoState, input: Omit<DemoNotification, "id" | "readAt" | "createdAt">) => {
+  state.notifications.unshift({ ...input, id: state.nextNotificationId++, readAt: null, createdAt: new Date() });
 };
 
 const requireUser = (state: DemoState): DemoUser => {
@@ -230,6 +296,17 @@ const handlers: Record<string, Handler> = {
     }),
 
   "daily.get": () => dailyChallenge(),
+  "daily.status": () => {
+    const state = readState();
+    const user = requireUser(state);
+    const daily = dailyChallenge();
+    return {
+      answered: state.receipts.find((receipt) => receipt.userId === user.id && receipt.dailyChallengeId === daily.id) ?? null,
+      currentStreak: user.currentStreak,
+      longestStreak: user.longestStreak,
+      week: activityWindow(state, 7),
+    };
+  },
   "daily.answer": (input: { answer: "YES" | "NO"; confidence: number }) =>
     mutate((state) => {
       const user = requireUser(state);
@@ -254,8 +331,15 @@ const handlers: Record<string, Handler> = {
         resolvedAt: null,
       };
       state.receipts.push(receipt);
-      user.currentStreak = Math.max(user.currentStreak, 1);
-      user.longestStreak = Math.max(user.longestStreak, user.currentStreak);
+      const today = startOfDay(new Date());
+      const key = dayKey(today);
+      if (!state.dailyActivity.includes(key)) {
+        user.currentStreak = nextStreak(user.currentStreak, user.lastDailyDate, today);
+        user.longestStreak = Math.max(user.longestStreak, user.currentStreak);
+        user.lastDailyDate = today;
+        state.dailyActivity.push(key);
+      }
+      state.events.push({ event: "daily_answered", properties: { answer: input.answer, confidence: input.confidence, streak: user.currentStreak }, at: new Date() });
       return receipt;
     }),
 
@@ -313,11 +397,15 @@ const handlers: Record<string, Handler> = {
       };
       state.receipts.push(receipt);
       if (input.challengeUsername) {
+        const challengeId = state.nextChallengeId++;
         state.challenges.push({
-          id: state.nextChallengeId++,
+          id: challengeId,
           receiptId: receipt.id,
           challengerId: user.id,
-          challengedId: -1,
+          // No second account exists in a single-browser demo, so the challenge
+          // is addressed back to the demo user: it keeps the accept flow
+          // reachable instead of permanently stuck on "waiting for them".
+          challengedId: user.id,
           challengerPosition: prediction,
           challengerConfidence: input.confidence,
           challengedPosition: null,
@@ -325,7 +413,18 @@ const handlers: Record<string, Handler> = {
           status: "OPEN",
           createdAt: new Date(),
         });
+        notify(state, {
+          userId: user.id,
+          type: "CHALLENGE_RECEIVED",
+          title: `@${input.challengeUsername} challenged you.`,
+          body: prediction,
+          linkPath: `/challenge/${challengeId}`,
+          actorId: user.id,
+          challengeId,
+        });
+        state.events.push({ event: "challenge_created", properties: { challengeId }, at: new Date() });
       }
+      state.events.push({ event: "receipt_created", properties: { receiptId: receipt.id, category: input.category, confidence: input.confidence, visibility: input.visibility }, at: new Date() });
       return receipt;
     }),
   "receipts.resolve": (input: { id: number; result: ReceiptStatus; note?: string }) =>
@@ -338,6 +437,7 @@ const handlers: Record<string, Handler> = {
       receipt.result = input.note ?? null;
       receipt.resolvedAt = new Date();
       user.accuracy = profileStats(state, user.id).accuracy;
+      state.events.push({ event: "receipt_resolved", properties: { receiptId: receipt.id, result: input.result }, at: new Date() });
       return receipt;
     }),
 
@@ -380,13 +480,53 @@ const handlers: Record<string, Handler> = {
     mutate((state) => {
       const challenge = state.challenges.find((item) => item.id === input.id);
       if (!challenge) throw new Error("This challenge is not for you.");
+      if (challenge.status !== "OPEN") throw new Error("You already answered this challenge.");
       challenge.challengedPosition = input.position.trim();
       challenge.challengedConfidence = input.confidence;
       challenge.status = "ACCEPTED";
+      notify(state, {
+        userId: challenge.challengerId,
+        type: "CHALLENGE_ACCEPTED",
+        title: "Your challenge was accepted.",
+        body: challenge.challengedPosition,
+        linkPath: `/challenge/${challenge.id}`,
+        actorId: challenge.challengedId,
+        challengeId: challenge.id,
+      });
+      state.events.push({ event: "challenge_accepted", properties: { challengeId: challenge.id, confidence: input.confidence }, at: new Date() });
       return {
         challenge,
         receipt: state.receipts.find((receipt) => receipt.id === challenge.receiptId) ?? null,
       };
+    }),
+  "notifications.list": () => {
+    const state = readState();
+    const user = requireUser(state);
+    return state.notifications.filter((item) => item.userId === user.id).slice(0, 25);
+  },
+  "notifications.unreadCount": () => {
+    const state = readState();
+    if (!state.user) return 0;
+    return state.notifications.filter((item) => item.userId === state.user!.id && !item.readAt).length;
+  },
+  "notifications.markRead": (input?: { ids?: number[] }) =>
+    mutate((state) => {
+      const user = requireUser(state);
+      for (const item of state.notifications) {
+        if (item.userId !== user.id || item.readAt) continue;
+        if (input?.ids?.length && !input.ids.includes(item.id)) continue;
+        item.readAt = new Date();
+      }
+      return { success: true } as const;
+    }),
+
+  "analytics.track": (input: { event: string; properties?: Record<string, unknown> }) =>
+    mutate((state) => {
+      // Kept to the last 200 so a long-lived browser cannot grow the record
+      // past what localStorage will hold.
+      state.events.push({ event: input.event, properties: input.properties ?? null, at: new Date() });
+      if (state.events.length > 200) state.events.splice(0, state.events.length - 200);
+      return { success: true } as const;
     }),
 };
 

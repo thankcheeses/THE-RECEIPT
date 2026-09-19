@@ -5,12 +5,25 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { challenges, dailyChallenges, receipts, users } from "../drizzle/schema";
-import { getChallengeById, getDb, getDailyChallengeForDate, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getUserByUsername, listChallengesForUser, listReceiptsForUser, recordAchievement } from "./db";
+import { countUnreadNotifications, createNotification, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getRetentionSummary, getUserById, getUserByUsername, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
 
 const categorySchema = z.enum(CATEGORIES);
 const statusSchema = z.enum(["RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]);
+
+// A closed vocabulary keeps the events table queryable — an open string field
+// fills up with typos and one-off names that nobody can aggregate later.
+export const ANALYTICS_EVENTS = [
+  "signup",
+  "daily_answered",
+  "receipt_created",
+  "receipt_shared",
+  "receipt_resolved",
+  "challenge_created",
+  "challenge_accepted",
+] as const;
+const analyticsEventSchema = z.enum(ANALYTICS_EVENTS);
 
 async function ensureDailyChallenge() {
   const now = new Date();
@@ -50,7 +63,24 @@ export const appRouter = router({
       await recordAchievement(ctx.user.id, "FIRST DAILY RECEIPT");
       const receipt = await getReceiptById(Number(result[0].insertId));
       if (!receipt) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Receipt was not created" });
+      const streak = await recordDailyActivity(ctx.user.id, daily.id, receipt.id);
+      await trackEvent("daily_answered", ctx.user.id, { answer: input.answer, confidence: input.confidence, streak: streak.currentStreak });
       return receipt;
+    }),
+    /** Streak + last-7-days activity for the daily page's header and dots. */
+    status: protectedProcedure.query(async ({ ctx }) => {
+      const daily = await ensureDailyChallenge();
+      const user = (await getUserById(ctx.user.id)) ?? ctx.user;
+      const db = await getDb();
+      const answered = db
+        ? (await db.select().from(receipts).where(and(eq(receipts.userId, ctx.user.id), eq(receipts.dailyChallengeId, daily.id))).limit(1))[0] ?? null
+        : null;
+      return {
+        answered,
+        currentStreak: user.currentStreak ?? 0,
+        longestStreak: user.longestStreak ?? 0,
+        week: await getDailyActivityWindow(ctx.user.id, 7),
+      };
     }),
   }),
 
@@ -75,11 +105,24 @@ export const appRouter = router({
       const result = await db.insert(receipts).values({ userId: ctx.user.id, prediction: input.prediction, category: input.category, confidence: input.confidence, resolutionDate: input.resolutionDate, status: "PENDING", visibility: input.visibility, challengeUserId: challengedUser?.id });
       const receiptId = Number(result[0].insertId);
       if (challengedUser) {
-        await db.insert(challenges).values({ receiptId, challengerId: ctx.user.id, challengedId: challengedUser.id, challengerPosition: input.prediction, challengerConfidence: input.confidence, status: "OPEN" });
+        const inserted = await db.insert(challenges).values({ receiptId, challengerId: ctx.user.id, challengedId: challengedUser.id, challengerPosition: input.prediction, challengerConfidence: input.confidence, status: "OPEN" });
+        const challengeId = Number(inserted[0].insertId);
+        const challenger = ctx.user.username ? `@${ctx.user.username}` : ctx.user.name || "Someone";
+        await createNotification({
+          userId: challengedUser.id,
+          type: "CHALLENGE_RECEIVED",
+          title: `${challenger} challenged you.`,
+          body: input.prediction,
+          linkPath: `/challenge/${challengeId}`,
+          actorId: ctx.user.id,
+          challengeId,
+        });
+        await trackEvent("challenge_created", ctx.user.id, { challengeId, challengedId: challengedUser.id });
       }
       await recordAchievement(ctx.user.id, "CALLER");
       const receipt = await getReceiptById(receiptId);
       if (!receipt) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Receipt was not created" });
+      await trackEvent("receipt_created", ctx.user.id, { receiptId, category: input.category, confidence: input.confidence, visibility: input.visibility, challenged: Boolean(challengedUser) });
       return receipt;
     }),
     resolve: protectedProcedure.input(z.object({ id: z.number().int().positive(), result: statusSchema, note: z.string().trim().max(280).optional() })).mutation(async ({ ctx, input }) => {
@@ -92,6 +135,7 @@ export const appRouter = router({
       const stats = await getProfileStats(ctx.user.id);
       await db.update(users).set({ accuracy: stats.accuracy }).where(eq(users.id, ctx.user.id));
       if (input.result === "RIGHT") await recordAchievement(ctx.user.id, "CALLER");
+      await trackEvent("receipt_resolved", ctx.user.id, { receiptId: input.id, result: input.result, confidence: receipt.confidence, category: receipt.category });
       return getReceiptById(input.id);
     }),
   }),
@@ -124,9 +168,51 @@ export const appRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
       const item = await getChallengeById(input.id);
       if (!item || item.challenge.challengedId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "This challenge is not for you." });
+      if (item.challenge.status !== "OPEN") throw new TRPCError({ code: "BAD_REQUEST", message: "You already answered this challenge." });
       await db.update(challenges).set({ challengedPosition: input.position, challengedConfidence: input.confidence, status: "ACCEPTED" }).where(eq(challenges.id, input.id));
+      const responder = ctx.user.username ? `@${ctx.user.username}` : ctx.user.name || "Someone";
+      await createNotification({
+        userId: item.challenge.challengerId,
+        type: "CHALLENGE_ACCEPTED",
+        title: `${responder} took your challenge.`,
+        body: input.position,
+        linkPath: `/challenge/${input.id}`,
+        actorId: ctx.user.id,
+        challengeId: input.id,
+      });
+      await trackEvent("challenge_accepted", ctx.user.id, { challengeId: input.id, confidence: input.confidence });
       return getChallengeById(input.id);
     }),
+  }),
+
+  notifications: router({
+    list: protectedProcedure.query(({ ctx }) => listNotifications(ctx.user.id)),
+    unreadCount: protectedProcedure.query(({ ctx }) => countUnreadNotifications(ctx.user.id)),
+    markRead: protectedProcedure
+      .input(z.object({ ids: z.array(z.number().int().positive()).optional() }).optional())
+      .mutation(async ({ ctx, input }) => {
+        await markNotificationsRead(ctx.user.id, input?.ids);
+        return { success: true } as const;
+      }),
+  }),
+
+  analytics: router({
+    /**
+     * Client-reported events. Only for things the server cannot observe, such
+     * as a share or a copied link; everything the server already handles is
+     * tracked there instead, where it cannot be spoofed or missed.
+     */
+    track: publicProcedure
+      .input(z.object({ event: analyticsEventSchema, properties: z.record(z.string(), z.unknown()).optional() }))
+      .mutation(async ({ ctx, input }) => {
+        await trackEvent(input.event, ctx.user?.id ?? null, input.properties);
+        return { success: true } as const;
+      }),
+    /** Aggregate funnel + retention. Admin-only: it spans every user. */
+    summary: adminProcedure.query(async () => ({
+      events: await getEventTotals(30),
+      retention: await getRetentionSummary(14),
+    })),
   }),
 });
 
