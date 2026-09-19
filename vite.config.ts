@@ -150,9 +150,35 @@ function vitePluginManusDebugCollector(): Plugin {
   };
 }
 
-const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()];
+/**
+ * Static build profile (VITE_STATIC_DEMO=true), used for the GitHub Pages
+ * deployment. It drops the Manus editor/runtime plugins — they exist to serve
+ * the hosted preview environment and only add weight to a plain static bundle.
+ */
+const isStaticBuild = process.env.VITE_STATIC_DEMO === "true";
+
+/**
+ * Removes the analytics tag from the static build: its `%VITE_ANALYTICS_*%`
+ * placeholders are injected by the Manus host and would otherwise ship as a
+ * literal, unresolvable script src.
+ */
+function vitePluginStripAnalytics(): Plugin {
+  return {
+    name: "strip-analytics",
+    transformIndexHtml(html) {
+      return html.replace(/\s*<script defer src="%VITE_ANALYTICS_ENDPOINT%[^>]*><\/script>/, "");
+    },
+  };
+}
+
+const plugins = isStaticBuild
+  ? [react(), tailwindcss(), vitePluginStripAnalytics()]
+  : [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()];
 
 export default defineConfig({
+  // GitHub Pages serves the project site from /THE-RECEIPT/; the server build
+  // stays at the domain root.
+  base: process.env.VITE_BASE_PATH ?? "/",
   plugins,
   resolve: {
     alias: {

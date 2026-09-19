@@ -4,7 +4,7 @@ import { trpc } from "@/lib/trpc";
 import { DEMO_RECEIPTS, CATEGORIES, type Category } from "@shared/seed";
 import { ArrowRight, BarChart3, Check, ChevronRight, Clock3, Copy, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, Sparkles, Target, Trophy, UserRound, X, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
-import { Link, Route, Switch, useLocation, useRoute } from "wouter";
+import { Link, Route, Router as WouterRouter, Switch, useLocation, useRoute } from "wouter";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -162,4 +162,8 @@ function NotFound() { return <Page title="404"><div className="empty-state"><Rec
 
 function Router() { return <Switch><Route path="/" component={Home} /><Route path="/daily" component={Daily} /><Route path="/create" component={Create} /><Route path="/receipts" component={MyReceipts} /><Route path="/receipt/:id" component={ReceiptDetail} /><Route path="/r/:id" component={ReceiptDetail} /><Route path="/challenges" component={Challenges} /><Route path="/challenge/:id" component={ChallengeDetail} /><Route path="/leaderboard" component={Leaderboard} /><Route path="/profile" component={Profile} /><Route component={NotFound} /></Switch>; }
 
-export default function App() { return <ErrorBoundary><ThemeProvider defaultTheme="light"><Toaster /><Router /></ThemeProvider></ErrorBoundary>; }
+// GitHub Pages serves the app from /THE-RECEIPT/, so every route is prefixed
+// with Vite's base path. It is "/" for the normal server build.
+const routerBase = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+export default function App() { return <ErrorBoundary><ThemeProvider defaultTheme="light"><Toaster /><WouterRouter base={routerBase}><Router /></WouterRouter></ThemeProvider></ErrorBoundary>; }

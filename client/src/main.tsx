@@ -5,6 +5,8 @@ import { httpBatchLink, TRPCClientError } from "@trpc/client";
 import { createRoot } from "react-dom/client";
 import superjson from "superjson";
 import App from "./App";
+import { IS_STATIC_DEMO, onDemoAuthChange } from "@/lib/staticDemo";
+import { staticLink } from "@/lib/staticLink";
 import { startLogin } from "./const";
 import "./index.css";
 
@@ -38,7 +40,9 @@ queryClient.getMutationCache().subscribe(event => {
 });
 
 const trpcClient = trpc.createClient({
-  links: [
+  // The GitHub Pages build has no /api/trpc to reach, so it resolves every
+  // procedure in the browser instead.
+  links: IS_STATIC_DEMO ? [staticLink()] : [
     httpBatchLink({
       url: "/api/trpc",
       transformer: superjson,
@@ -71,6 +75,10 @@ const trpcClient = trpc.createClient({
     }),
   ],
 });
+
+// The demo sign-in mutates localStorage rather than completing an OAuth
+// redirect, so nothing invalidates the auth query on its own.
+if (IS_STATIC_DEMO) onDemoAuthChange(() => queryClient.invalidateQueries());
 
 createRoot(document.getElementById("root")!).render(
   <trpc.Provider client={trpcClient} queryClient={queryClient}>
