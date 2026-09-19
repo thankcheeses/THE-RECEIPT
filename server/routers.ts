@@ -1,6 +1,7 @@
 import { COOKIE_NAME } from "@shared/const";
 import { CATEGORIES, DAILY_PROMPTS, getTodayPrompt, formatReceiptNumber } from "@shared/seed";
 import { INTERACTION_TYPES, SEMANTIC_TYPES, allowsInteraction, defaultSemanticTypeFor, resolveSemanticType } from "@shared/interactionPolicy";
+import { MAX_REPORT_DETAIL, MODERATION_ACTIONS, REPORT_REASONS, REPORT_STATUSES } from "@shared/moderation";
 import { and, desc, eq } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
@@ -8,12 +9,15 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { challenges, dailyChallenges, receipts, users } from "../drizzle/schema";
-import { canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getDerivedCount, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
+import { applyModerationAction, countOpenReports, createReceiptReport, getReportByReporter, getReportQueue, listModerationActions, canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getDerivedCount, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
 
 const categorySchema = z.enum(CATEGORIES);
 const semanticTypeSchema = z.enum(SEMANTIC_TYPES);
 const interactionSchema = z.enum(INTERACTION_TYPES);
 const statusSchema = z.enum(["RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]);
+const reportReasonSchema = z.enum(REPORT_REASONS);
+const reportStatusSchema = z.enum(REPORT_STATUSES);
+const moderationActionSchema = z.enum(MODERATION_ACTIONS);
 
 // A closed vocabulary keeps the events table queryable — an open string field
 // fills up with typos and one-off names that nobody can aggregate later.
@@ -280,6 +284,121 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         await markNotificationsRead(ctx.user.id, input?.ids);
         return { success: true } as const;
+      }),
+  }),
+
+  /**
+   * Reporting and takedown.
+   *
+   * A Receipt is never edited or deleted here. `HIDE` takes it off every
+   * public surface and leaves the row, its interactions and its lineage
+   * exactly as they were, which is what makes `RESTORE` a real undo and keeps
+   * the product's promise that a locked statement stays locked.
+   */
+  moderation: router({
+    /**
+     * Files a report against a public Receipt.
+     *
+     * Requires an account, because one report per person per Receipt is the
+     * thing that stops a single reporter manufacturing a queue — and an
+     * anonymous report has no key to deduplicate on. People without an account
+     * are pointed at the published abuse contact instead.
+     */
+    report: protectedProcedure
+      .input(
+        z.object({
+          receiptId: z.number().int().positive(),
+          reason: reportReasonSchema,
+          detail: z.string().trim().max(MAX_REPORT_DETAIL).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Only a Receipt the reporter can actually see. This also means an
+        // already-hidden Receipt cannot be reported again — it is already off
+        // the public surfaces a report would ask for.
+        const result = await getPublicReceipt(input.receiptId);
+        if (!result?.receipt) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "That receipt is private or no longer exists." });
+        }
+        if (result.receipt.userId === ctx.user.id) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "This is your own receipt. Reporting it would not remove it — receipts cannot be deleted.",
+          });
+        }
+        const outcome = await createReceiptReport({
+          receiptId: input.receiptId,
+          reporterId: ctx.user.id,
+          reason: input.reason,
+          detail: input.detail ?? null,
+        });
+        if (outcome.rateLimited) {
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: "You have reported a lot today. Try again tomorrow, or write to the abuse contact.",
+          });
+        }
+        // A repeat report is the same report. Saying so beats an error the
+        // reporter has to interpret, and it leaks nothing they did not do.
+        return { received: true, alreadyReported: !outcome.created } as const;
+      }),
+
+    /** Whether the signed-in viewer has already reported this Receipt. */
+    myReport: protectedProcedure
+      .input(z.object({ receiptId: z.number().int().positive() }))
+      .query(async ({ ctx, input }) => {
+        const existing = await getReportByReporter(input.receiptId, ctx.user.id);
+        return { reported: Boolean(existing), reason: existing?.reason ?? null };
+      }),
+
+    /** The moderation queue. Admin-only: it spans every user's content. */
+    queue: adminProcedure
+      .input(
+        z
+          .object({
+            status: reportStatusSchema.optional(),
+            cursor: z.number().int().positive().optional(),
+            limit: z.number().int().min(1).max(100).optional(),
+          })
+          .optional(),
+      )
+      .query(({ input }) => getReportQueue(input ?? { status: "OPEN" })),
+
+    /** Everything ever decided about one Receipt, plus its current state. */
+    history: adminProcedure
+      .input(z.object({ receiptId: z.number().int().positive() }))
+      .query(async ({ input }) => {
+        const receipt = await getReceiptById(input.receiptId);
+        if (!receipt) throw new TRPCError({ code: "NOT_FOUND", message: "No receipt with that id." });
+        return {
+          receipt,
+          actions: await listModerationActions(input.receiptId),
+          openReports: await countOpenReports(input.receiptId),
+        };
+      }),
+
+    /**
+     * Records a moderator's decision and applies it. Every call appends an
+     * audit row, including `DISMISS` — "we looked and left it up" is a
+     * decision the next moderator needs to see.
+     */
+    act: adminProcedure
+      .input(
+        z.object({
+          receiptId: z.number().int().positive(),
+          action: moderationActionSchema,
+          note: z.string().trim().max(MAX_REPORT_DETAIL).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const outcome = await applyModerationAction({
+          receiptId: input.receiptId,
+          moderatorId: ctx.user.id,
+          action: input.action,
+          note: input.note ?? null,
+        });
+        if (!outcome) throw new TRPCError({ code: "NOT_FOUND", message: "No receipt with that id." });
+        return outcome;
       }),
   }),
 

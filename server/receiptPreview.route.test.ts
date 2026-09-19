@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { isPubliclyVisible } from "@shared/moderation";
 import express from "express";
 import type { Server } from "node:http";
 import fs from "node:fs";
@@ -15,14 +16,27 @@ const publicReceipt = {
     createdAt: new Date("2026-09-19T00:00:00Z"),
     resolutionDate: new Date("2026-10-03T00:00:00Z"),
     visibility: "PUBLIC",
+    moderationStatus: "VISIBLE",
   },
   user: { username: "nia", name: "Nia" },
 };
 
-// Only 4821 is public. 4822 stands in for a private or missing receipt.
+// The same receipt after a moderator took it down. Nothing about it changed
+// except whether the public may see it.
+const hiddenReceipt = {
+  receipt: { ...publicReceipt.receipt, id: 4823, moderationStatus: "HIDDEN" },
+  user: publicReceipt.user,
+};
+
+// 4821 is public, 4823 is hidden, 4822 stands in for private or missing. The
+// mock applies the same rule the real getPublicReceipt does, so a takedown
+// closes the preview and the card together.
 vi.mock("./db", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./db")>()),
-  getPublicReceipt: async (id: number) => (id === 4821 ? publicReceipt : undefined),
+  getPublicReceipt: async (id: number) => {
+    const row = id === 4821 ? publicReceipt : id === 4823 ? hiddenReceipt : undefined;
+    return row && isPubliclyVisible(row.receipt) ? row : undefined;
+  },
 }));
 
 const { registerReceiptPreview } = await import("./receiptPreview");
@@ -92,6 +106,15 @@ describe("GET /r/:id", () => {
     expect(html).not.toContain("og:image");
   });
 
+  it("gives a receipt taken down by a moderator no metadata at all", async () => {
+    const html = await (await fetch(`${base}/r/4823`)).text();
+    expect(html).toContain("generic site description");
+    expect(html).not.toContain("Receipt #004823");
+    expect(html).not.toContain("og:image");
+    // The shell still renders, exactly as it does for a private receipt.
+    expect(html).toContain('<div id="root"></div>');
+  });
+
   it("falls through for a non-numeric id rather than erroring", async () => {
     const res = await fetch(`${base}/r/not-a-number`);
     expect(res.status).toBe(200);
@@ -115,6 +138,10 @@ describe("GET /r/:id/image.png", () => {
 
   it("404s for a private or missing receipt instead of rendering one", async () => {
     expect((await fetch(`${base}/r/4822/image.png`)).status).toBe(404);
+  });
+
+  it("404s for a receipt taken down by a moderator", async () => {
+    expect((await fetch(`${base}/r/4823/image.png`)).status).toBe(404);
   });
 
   it("rejects a malformed id", async () => {

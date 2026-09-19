@@ -43,6 +43,13 @@
       "when": 1789793999621,
       "tag": "0005_common_chronomancer",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1789802842788,
+      "tag": "0006_late_stellaris",
+      "breakpoints": true
     }
   ]
 }
