@@ -1,4 +1,5 @@
 import { OAUTH_STATE_COOKIE, encodeOAuthState } from "@shared/const";
+import { IS_STATIC_DEMO, startDemoLogin } from "@/lib/staticDemo";
 
 export { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 
@@ -13,6 +14,10 @@ export { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 // with "invalid oauth state". It returns void by design, so there is no URL to
 // stash across renders.
 export const startLogin = () => {
+  // The static (GitHub Pages) build has no OAuth callback endpoint to return
+  // to, so it signs in a local demo account instead of leaving the site.
+  if (IS_STATIC_DEMO) return startDemoLogin();
+
   const oauthPortalUrl = import.meta.env.VITE_OAUTH_PORTAL_URL;
   const appId = import.meta.env.VITE_APP_ID;
   const redirectUri = `${window.location.origin}/api/oauth/callback`;

@@ -75,6 +75,22 @@ The test suite currently covers auth logout cookie clearing and the receipt seed
 
 For Manus WebDev, use the saved project checkpoint and the platform’s publish flow. The production build is created with `pnpm build` and started with `pnpm start`. For another Node hosting provider, provide Node.js 22+, pnpm, the required environment variables, a MySQL/TiDB database, and the same build/start commands.
 
+### GitHub Pages (static demo)
+
+`https://thankcheeses.github.io/THE-RECEIPT/` serves the same interface as the hosted app, built by `.github/workflows/deploy-pages.yml` on every push to `main`.
+
+GitHub Pages serves files only — there is no Express server and no MySQL behind it — so the static build swaps the tRPC HTTP link for `client/src/lib/staticLink.ts`, which resolves every procedure in the browser against `client/src/lib/staticDemo.ts` (localStorage). Sign-in creates a local demo account instead of running the Manus OAuth redirect, and receipts persist per browser rather than per account. Everything else — routes, layout, styling, the daily prompt rotation — is the same code as the server build.
+
+Build it locally with:
+
+```bash
+pnpm build:static          # writes dist/public with base path /THE-RECEIPT/
+```
+
+The script copies `index.html` to `404.html` so deep links such as `/THE-RECEIPT/daily` resolve, and writes `.nojekyll` so Jekyll leaves the assets alone. Override the base path with `VITE_BASE_PATH=/ pnpm build:static` when serving from a domain root.
+
+Enable it once under **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+
 ## Repository guide
 
 - `HANDOFF.md` — continuation guide for another developer or coding agent.
