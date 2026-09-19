@@ -10,7 +10,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { challenges, dailyChallenges, receipts, users } from "../drizzle/schema";
-import { deleteAccount, isUsernameAvailable, applyModerationAction, countOpenReports, createReceiptReport, getReportByReporter, getReportQueue, listModerationActions, canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getDerivedCount, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
+import { RESOLVABLE_STATUSES, syncResolutionNotifications, deleteAccount, isUsernameAvailable, applyModerationAction, countOpenReports, createReceiptReport, getReportByReporter, getReportQueue, listModerationActions, canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getDerivedCount, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
 
 const categorySchema = z.enum(CATEGORIES);
 const semanticTypeSchema = z.enum(SEMANTIC_TYPES);
@@ -202,7 +202,7 @@ export const appRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
       const receipt = await getReceiptById(input.id);
       if (!receipt || receipt.userId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "You can only resolve your own receipts." });
-      if (!["PENDING", "LOCKED"].includes(receipt.status)) throw new TRPCError({ code: "BAD_REQUEST", message: "This receipt is already resolved." });
+      if (!(RESOLVABLE_STATUSES as readonly string[]).includes(receipt.status)) throw new TRPCError({ code: "BAD_REQUEST", message: "This receipt is already resolved." });
       if (!canResolveAt(receipt.resolutionDate)) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -304,8 +304,19 @@ export const appRouter = router({
   }),
 
   notifications: router({
-    list: protectedProcedure.query(({ ctx }) => listNotifications(ctx.user.id)),
-    unreadCount: protectedProcedure.query(({ ctx }) => countUnreadNotifications(ctx.user.id)),
+    /**
+     * Both reads sync first, so a Receipt coming due turns into a notification
+     * without a scheduler. The sync is idempotent and never throws, so the
+     * bell behaves identically whether or not it had anything to create.
+     */
+    list: protectedProcedure.query(async ({ ctx }) => {
+      await syncResolutionNotifications(ctx.user.id);
+      return listNotifications(ctx.user.id);
+    }),
+    unreadCount: protectedProcedure.query(async ({ ctx }) => {
+      await syncResolutionNotifications(ctx.user.id);
+      return countUnreadNotifications(ctx.user.id);
+    }),
     markRead: protectedProcedure
       .input(z.object({ ids: z.array(z.number().int().positive()).optional() }).optional())
       .mutation(async ({ ctx, input }) => {

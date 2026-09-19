@@ -241,19 +241,35 @@ export const dailyActivity = mysqlTable(
   (table) => [uniqueIndex("dailyActivity_user_date").on(table.userId, table.activityDate)],
 );
 
-/** In-app notifications. Currently driven by challenge create/accept. */
-export const notifications = mysqlTable("notifications", {
-  id: int("id").autoincrement().primaryKey(),
-  userId: int("userId").notNull(),
-  type: mysqlEnum("type", ["CHALLENGE_RECEIVED", "CHALLENGE_ACCEPTED", "RECEIPT_RESOLVED"]).notNull(),
-  title: varchar("title", { length: 160 }).notNull(),
-  body: text("body"),
-  linkPath: varchar("linkPath", { length: 200 }),
-  actorId: int("actorId"),
-  challengeId: int("challengeId"),
-  readAt: timestamp("readAt"),
-  createdAt: timestamp("createdAt").defaultNow().notNull(),
-});
+/** In-app notifications. Driven by challenge create/accept and resolution due. */
+export const notifications = mysqlTable(
+  "notifications",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    userId: int("userId").notNull(),
+    // RECEIPT_DUE: this person's Receipt has reached its resolution date and
+    // they can now record a result. RECEIPT_RESOLVED is declared but nothing
+    // emits it yet; it is deliberately not reused for "due", which is a
+    // different statement.
+    type: mysqlEnum("type", ["CHALLENGE_RECEIVED", "CHALLENGE_ACCEPTED", "RECEIPT_RESOLVED", "RECEIPT_DUE"]).notNull(),
+    title: varchar("title", { length: 160 }).notNull(),
+    body: text("body"),
+    linkPath: varchar("linkPath", { length: 200 }),
+    actorId: int("actorId"),
+    challengeId: int("challengeId"),
+    /** The Receipt this notification is about, where it is about one. */
+    receiptId: int("receiptId"),
+    readAt: timestamp("readAt"),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (table) => [
+    // "Once per receipt, ever" is enforced here rather than by a read-then-write
+    // check. The bell polls, so two concurrent requests would otherwise both
+    // find nothing and both insert. Existing rows carry a null receiptId and
+    // MySQL treats nulls as distinct, so they cannot collide with each other.
+    uniqueIndex("notifications_user_type_receipt").on(table.userId, table.type, table.receiptId),
+  ],
+);
 
 /**
  * Product analytics. Deliberately append-only and free of PII beyond the user
