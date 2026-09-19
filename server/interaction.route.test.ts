@@ -25,7 +25,7 @@ vi.mock("./db", async (importOriginal) => ({
   },
   getInteractionCounts: async () => ({}),
   getViewerInteraction: async () => null,
-  getDerivedCount: async () => 3,
+  getMeTooCluster: async () => ({ total: 3, open: 3, right: 0, wrong: 0, partial: 0, tooEarly: 0, resolved: 0 }),
 }));
 
 const { appRouter } = await import("./routers");

@@ -513,17 +513,53 @@ export async function getViewerInteraction(receiptId: number, userId: number) {
 }
 
 /**
- * How many Receipts were written after this one ("ME TOO"). Counts authored
- * Receipts, not reactions — which is the whole point of the distinction.
+ * Turns per-status counts into the cluster a Receipt shows.
+ *
+ * Pure, so the arithmetic is testable without a database. The buckets are the
+ * Receipt statuses that already exist — nothing here invents a new resolution
+ * model, and an unrecognised status is counted in the total but in no bucket
+ * rather than being silently folded into one it does not belong to.
  */
-export async function getDerivedCount(receiptId: number) {
+export function summarizeCluster(rows: Array<{ status: string; total: number | string }>) {
+  const bucket = { open: 0, right: 0, wrong: 0, partial: 0, tooEarly: 0 };
+  let total = 0;
+  for (const row of rows) {
+    const n = Number(row.total) || 0;
+    total += n;
+    if (row.status === "PENDING" || row.status === "LOCKED") bucket.open += n;
+    else if (row.status === "RIGHT") bucket.right += n;
+    else if (row.status === "WRONG") bucket.wrong += n;
+    else if (row.status === "PARTIALLY RIGHT") bucket.partial += n;
+    else if (row.status === "TOO EARLY") bucket.tooEarly += n;
+  }
+  return { total, ...bucket, resolved: bucket.right + bucket.wrong + bucket.partial + bucket.tooEarly };
+}
+
+/**
+ * The ME TOO cluster for one Receipt: the independently authored Receipts
+ * written after it, and how they have turned out so far.
+ *
+ * Every member is a real Receipt someone locked themselves — this counts rows
+ * in `receipts`, never interactions, so it cannot be inflated by a reaction or
+ * by reading the page twice.
+ *
+ * It composes publicReceiptWhere(), so a private or taken-down ME TOO is
+ * absent for everyone, including its own author: the count is a public fact
+ * and must read the same to every viewer. The original Receipt cannot count
+ * itself, because a Receipt's derivedFromId never points at itself.
+ *
+ * A member whose author deleted their account still counts. The call was
+ * genuinely made and independently locked; only the person behind it is gone.
+ */
+export async function getMeTooCluster(receiptId: number) {
   const db = await getDb();
-  if (!db) return 0;
+  if (!db) return summarizeCluster([]);
   const rows = await db
-    .select({ total: count() })
+    .select({ status: receipts.status, total: count() })
     .from(receipts)
-    .where(publicReceiptWhere(eq(receipts.derivedFromId, receiptId)));
-  return Number(rows[0]?.total ?? 0);
+    .where(publicReceiptWhere(eq(receipts.derivedFromId, receiptId)))
+    .groupBy(receipts.status);
+  return summarizeCluster(rows);
 }
 
 // ---------------------------------------------------------------------------

@@ -245,7 +245,40 @@ function ReceiptActions({ receipt }: { receipt: any }) {
       <button className="action-button metoo" onClick={writeOwn}><ReceiptText size={15} /> <span>Me too</span>{data?.derivedCount ? <b>{data.derivedCount}</b> : null}</button>
     </div>
     {semanticType === "PREDICTION" && <p className="action-note">Disagreeing is only the start — <button className="text-link inline" onClick={writeOwn}>put your own call on the record</button>.</p>}
-    {data?.derivedCount ? <p className="action-note">{data.derivedCount} {data.derivedCount === 1 ? "person has" : "people have"} written their own receipt after this one.</p> : null}
+    {data?.cluster?.total ? <MeTooCluster cluster={data.cluster} /> : null}
+  </div>;
+}
+
+/**
+ * The ME TOO cluster: everyone who wrote their own receipt after this one.
+ *
+ * Every number here is a receipt somebody locked themselves — not a like, not
+ * a reaction, not a count of people who merely agreed. The outcome line only
+ * appears once some of them have actually been resolved, because until then
+ * there is nothing to report and a row of zeroes says nothing.
+ */
+function MeTooCluster({ cluster }: { cluster: { total: number; open: number; right: number; wrong: number; partial: number; tooEarly: number; resolved: number } }) {
+  const outcomes = [
+    { label: "RIGHT", value: cluster.right, className: "status-right" },
+    { label: "WRONG", value: cluster.wrong, className: "status-wrong" },
+    { label: "PARTIAL", value: cluster.partial, className: "status-partial" },
+    { label: "TOO EARLY", value: cluster.tooEarly, className: "status-early" },
+  ].filter((outcome) => outcome.value > 0);
+
+  return <div className="metoo-cluster">
+    <div className="cluster-head">
+      <strong>{cluster.total}</strong>
+      <span>{cluster.total === 1 ? "person called this" : "people called this"}</span>
+    </div>
+    {cluster.resolved > 0 && <div className="cluster-outcomes">
+      {outcomes.map((outcome) => <span key={outcome.label} className={outcome.className}>
+        <b>{outcome.value}</b> {outcome.label}
+      </span>)}
+      {cluster.open > 0 && <span className="cluster-open"><b>{cluster.open}</b> STILL OPEN</span>}
+    </div>}
+    {cluster.resolved === 0 && <p className="cluster-note">
+      {cluster.total === 1 ? "Their receipt is" : "Their receipts are"} still open. Nobody knows yet.
+    </p>}
   </div>;
 }
 
