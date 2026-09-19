@@ -40,7 +40,7 @@ There is no money, betting, or wagering in the product.
 
 ## Tech stack
 
-React 19 · TypeScript · Vite · Tailwind CSS 4 · Wouter · Express 4 · tRPC 11 · Drizzle ORM · MySQL/TiDB · Zod · Vitest · pnpm
+React 19 · TypeScript · Vite · Tailwind CSS 4 · Wouter · Express 4 · tRPC 11 · Drizzle ORM · MySQL/TiDB · Zod · Satori + resvg (social cards) · Vitest · pnpm
 
 The app runs as a single Node process: Express serves the client and hosts tRPC under `/api/trpc`.
 
@@ -75,6 +75,16 @@ pnpm db:push                # both, in sequence
 ```
 
 Review generated SQL before applying it to a database that holds real data.
+
+## Social previews
+
+A public receipt at `/r/:id` is served by the Node app with its own Open Graph and Twitter card metadata — title, description, canonical URL, and a generated 1200×630 PNG at `/r/:id/image.png`. The card is drawn from the same visual language as the in-app receipt, so a shared link previews as the receipt it points at.
+
+The tags are read from the database per request, so a receipt created after the last deploy previews correctly. Private receipts are never given metadata: `/r/:id` falls through to the plain application shell and the image endpoint returns 404.
+
+The image is rendered with `satori` + `@resvg/resvg-js` and fonts from `@fontsource`, and cached briefly in memory.
+
+**The GitHub Pages demo does not do this.** Pages serves static files with no server, so it cannot generate per-receipt tags. Its receipts also live in one browser's `localStorage` and are not reachable by anyone else, so there is nothing for a crawler to preview. The demo keeps the site's generic tags.
 
 ## GitHub Pages demo
 

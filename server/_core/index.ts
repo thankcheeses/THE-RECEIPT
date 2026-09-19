@@ -2,12 +2,14 @@ import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
 import net from "net";
+import path from "node:path";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { registerReceiptPreview } from "../receiptPreview";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -48,6 +50,9 @@ async function startServer() {
   if (process.env.NODE_ENV === "development") {
     await setupVite(app, server);
   } else {
+    // Social crawlers need per-receipt metadata, so /r/:id is answered here
+    // before the static handler falls everything through to index.html.
+    registerReceiptPreview(app, path.resolve(import.meta.dirname, "public"));
     serveStatic(app);
   }
 
