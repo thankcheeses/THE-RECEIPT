@@ -16,6 +16,15 @@ import { ENV } from "./_core/env";
 const RESOLVED_STATUSES: string[] = ["RIGHT", "WRONG", "PARTIALLY RIGHT"];
 
 /**
+ * Statuses a Receipt can still be resolved from.
+ *
+ * Shared by the `resolve` guard and by the due-notification query below. If
+ * these drifted apart the bell would announce Receipts that resolve() refuses,
+ * which is worse than no notification at all.
+ */
+export const RESOLVABLE_STATUSES = ["PENDING", "LOCKED"] as const;
+
+/**
  * What it takes for a Receipt to be shown to the public: the author made it
  * public, AND moderation has not taken it down.
  *
@@ -565,12 +574,13 @@ export async function getResolvingSoon(options: { limit?: number; now?: Date } =
 
 export async function createNotification(input: {
   userId: number;
-  type: "CHALLENGE_RECEIVED" | "CHALLENGE_ACCEPTED" | "RECEIPT_RESOLVED";
+  type: "CHALLENGE_RECEIVED" | "CHALLENGE_ACCEPTED" | "RECEIPT_RESOLVED" | "RECEIPT_DUE";
   title: string;
   body?: string | null;
   linkPath?: string | null;
   actorId?: number | null;
   challengeId?: number | null;
+  receiptId?: number | null;
 }) {
   const db = await getDb();
   if (!db) return;
@@ -582,7 +592,93 @@ export async function createNotification(input: {
     linkPath: input.linkPath ?? null,
     actorId: input.actorId ?? null,
     challengeId: input.challengeId ?? null,
+    receiptId: input.receiptId ?? null,
   });
+}
+
+/**
+ * How many Receipts one sync may announce. A person returning after a long gap
+ * could have many at once; the rest arrive on the next poll rather than in one
+ * unbounded write.
+ */
+const MAX_DUE_NOTIFICATIONS_PER_SYNC = 25;
+
+/** The title and body a due Receipt gets. Pure, so the wording is testable. */
+export function buildDueNotification(receipt: { id: number; prediction: string }) {
+  return {
+    title: `Receipt #${String(receipt.id).padStart(6, "0")} is ready to resolve.`,
+    body: receipt.prediction,
+    // The owner view, which carries the resolve controls. The public view at
+    // /r/:id has none, so linking there would be a dead end.
+    linkPath: `/receipt/${receipt.id}`,
+  };
+}
+
+/**
+ * Creates the "ready to resolve" notification for any of this person's
+ * Receipts that have come due and do not have one yet.
+ *
+ * There is no scheduler in this application, so this runs on the notification
+ * read path — the bell already polls it. That makes idempotence the whole
+ * design: the unique index on (userId, type, receiptId) is what guarantees one
+ * notification per Receipt ever, rather than the absence check below, which is
+ * only an optimisation. Two concurrent polls both passing that check is
+ * exactly the race the index exists to lose.
+ *
+ * Eligibility deliberately mirrors what `receipts.resolve` accepts: authored
+ * by this person, still open, and past its resolution date. A Receipt whose
+ * author deleted their account has a null userId and matches nothing here.
+ *
+ * Never throws into the request: a missed notification must not cost someone
+ * their page load.
+ */
+export async function syncResolutionNotifications(userId: number, now: Date = new Date()) {
+  try {
+    const db = await getDb();
+    if (!db) return 0;
+
+    const due = await db
+      .select({ id: receipts.id, prediction: receipts.prediction })
+      .from(receipts)
+      .leftJoin(
+        notifications,
+        and(
+          eq(notifications.receiptId, receipts.id),
+          eq(notifications.userId, userId),
+          eq(notifications.type, "RECEIPT_DUE"),
+        ),
+      )
+      .where(
+        and(
+          eq(receipts.userId, userId),
+          inArray(receipts.status, [...RESOLVABLE_STATUSES]),
+          lte(receipts.resolutionDate, now),
+          isNull(notifications.id),
+        ),
+      )
+      .orderBy(asc(receipts.resolutionDate))
+      .limit(MAX_DUE_NOTIFICATIONS_PER_SYNC);
+
+    if (!due.length) return 0;
+
+    await db
+      .insert(notifications)
+      .values(
+        due.map((receipt) => ({
+          userId,
+          type: "RECEIPT_DUE" as const,
+          receiptId: receipt.id,
+          ...buildDueNotification(receipt),
+        })),
+      )
+      // A no-op on conflict: the row another request just inserted stands.
+      .onDuplicateKeyUpdate({ set: { type: "RECEIPT_DUE" } });
+
+    return due.length;
+  } catch (error) {
+    console.warn("[Notifications] Failed to sync resolution notifications:", error);
+    return 0;
+  }
 }
 
 export async function listNotifications(userId: number, limit = 25) {

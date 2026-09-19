@@ -106,12 +106,13 @@ type DemoChallenge = {
 type DemoNotification = {
   id: number;
   userId: number;
-  type: "CHALLENGE_RECEIVED" | "CHALLENGE_ACCEPTED" | "RECEIPT_RESOLVED";
+  type: "CHALLENGE_RECEIVED" | "CHALLENGE_ACCEPTED" | "RECEIPT_RESOLVED" | "RECEIPT_DUE";
   title: string;
   body: string | null;
   linkPath: string | null;
   actorId: number | null;
   challengeId: number | null;
+  receiptId: number | null;
   readAt: Date | null;
   createdAt: Date;
 };
@@ -143,6 +144,8 @@ type DemoState = {
 };
 
 const RESOLVED_STATUSES: ReceiptStatus[] = ["RIGHT", "WRONG", "PARTIALLY RIGHT"];
+/** Mirrors RESOLVABLE_STATUSES in server/db.ts. */
+const RESOLVABLE_STATUSES: ReceiptStatus[] = ["PENDING", "LOCKED"];
 
 const emptyState = (): DemoState => ({
   user: null,
@@ -312,8 +315,50 @@ const publicUser = (user: DemoUser | null) =>
     createdAt: user.createdAt,
   };
 
-const notify = (state: DemoState, input: Omit<DemoNotification, "id" | "readAt" | "createdAt">) => {
-  state.notifications.unshift({ ...input, id: state.nextNotificationId++, readAt: null, createdAt: new Date() });
+/**
+ * Mirrors syncResolutionNotifications() in server/db.ts: the caller's own
+ * receipts that are past their resolution date and still open get one
+ * notification each, once ever.
+ *
+ * The server relies on a unique index to make that true under concurrency.
+ * One browser is single-threaded, so the existence check below is the whole
+ * guard here — the rule it enforces is the same one.
+ */
+const syncDemoResolutionNotifications = (state: DemoState, user: DemoUser) => {
+  const now = Date.now();
+  for (const receipt of state.receipts) {
+    if (receipt.userId !== user.id) continue;
+    if (!RESOLVABLE_STATUSES.includes(receipt.status)) continue;
+    if (new Date(receipt.resolutionDate).getTime() > now) continue;
+    const exists = state.notifications.some(
+      (item) => item.userId === user.id && item.type === "RECEIPT_DUE" && item.receiptId === receipt.id,
+    );
+    if (exists) continue;
+    notify(state, {
+      userId: user.id,
+      type: "RECEIPT_DUE",
+      receiptId: receipt.id,
+      actorId: null,
+      challengeId: null,
+      title: `Receipt #${String(receipt.id).padStart(6, "0")} is ready to resolve.`,
+      body: receipt.prediction,
+      linkPath: `/receipt/${receipt.id}`,
+    });
+  }
+};
+
+const notify = (
+  state: DemoState,
+  // receiptId is optional: only receipt-scoped notifications carry one.
+  input: Omit<DemoNotification, "id" | "readAt" | "createdAt" | "receiptId"> & { receiptId?: number | null },
+) => {
+  state.notifications.unshift({
+    ...input,
+    receiptId: input.receiptId ?? null,
+    id: state.nextNotificationId++,
+    readAt: null,
+    createdAt: new Date(),
+  });
 };
 
 const requireUser = (state: DemoState): DemoUser => {
@@ -754,16 +799,18 @@ const handlers: Record<string, Handler> = {
         receipt: state.receipts.find((receipt) => receipt.id === challenge.receiptId) ?? null,
       };
     }),
-  "notifications.list": () => {
-    const state = readState();
-    const user = requireUser(state);
-    return state.notifications.filter((item) => item.userId === user.id).slice(0, 25);
-  },
-  "notifications.unreadCount": () => {
-    const state = readState();
-    if (!state.user) return 0;
-    return state.notifications.filter((item) => item.userId === state.user!.id && !item.readAt).length;
-  },
+  "notifications.list": () =>
+    mutate((state) => {
+      const user = requireUser(state);
+      syncDemoResolutionNotifications(state, user);
+      return state.notifications.filter((item) => item.userId === user.id).slice(0, 25);
+    }),
+  "notifications.unreadCount": () =>
+    mutate((state) => {
+      const user = requireUser(state);
+      syncDemoResolutionNotifications(state, user);
+      return state.notifications.filter((item) => item.userId === user.id && !item.readAt).length;
+    }),
   "notifications.markRead": (input?: { ids?: number[] }) =>
     mutate((state) => {
       const user = requireUser(state);
