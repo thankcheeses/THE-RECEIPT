@@ -2,6 +2,7 @@ import { COOKIE_NAME } from "@shared/const";
 import { CATEGORIES, DAILY_PROMPTS, getTodayPrompt, formatReceiptNumber } from "@shared/seed";
 import { INTERACTION_TYPES, SEMANTIC_TYPES, allowsInteraction, defaultSemanticTypeFor, resolveSemanticType } from "@shared/interactionPolicy";
 import { MAX_REPORT_DETAIL, MODERATION_ACTIONS, REPORT_REASONS, REPORT_STATUSES } from "@shared/moderation";
+import { USERNAME_UNAVAILABLE } from "@shared/accountDeletion";
 import { and, desc, eq } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
@@ -9,7 +10,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { challenges, dailyChallenges, receipts, users } from "../drizzle/schema";
-import { applyModerationAction, countOpenReports, createReceiptReport, getReportByReporter, getReportQueue, listModerationActions, canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getDerivedCount, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
+import { deleteAccount, isUsernameAvailable, applyModerationAction, countOpenReports, createReceiptReport, getReportByReporter, getReportQueue, listModerationActions, canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getDerivedCount, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
 
 const categorySchema = z.enum(CATEGORIES);
 const semanticTypeSchema = z.enum(SEMANTIC_TYPES);
@@ -240,11 +241,32 @@ export const appRouter = router({
     setUsername: protectedProcedure.input(z.object({ username: z.string().trim().min(3).max(24).regex(/^[a-zA-Z0-9_]+$/) })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
-      const existing = await getUserByUsername(input.username);
-      if (existing && existing.id !== ctx.user.id) throw new TRPCError({ code: "CONFLICT", message: "That username is already taken." });
+      if (!(await isUsernameAvailable(input.username, ctx.user.id))) {
+        throw new TRPCError({ code: "CONFLICT", message: USERNAME_UNAVAILABLE });
+      }
       await db.update(users).set({ username: input.username }).where(eq(users.id, ctx.user.id));
       return { username: input.username };
     }),
+  }),
+
+  account: router({
+    /**
+     * Deletes the caller's own account. Nobody can delete anybody else's:
+     * there is no id parameter, and admins get no override.
+     *
+     * Irreversible, so it takes an explicit confirmation rather than firing on
+     * a mis-click. The session cookie is cleared on the way out, because the
+     * account it identifies no longer exists.
+     */
+    delete: protectedProcedure
+      .input(z.object({ confirm: z.literal("DELETE MY ACCOUNT") }))
+      .mutation(async ({ ctx }) => {
+        const outcome = await deleteAccount(ctx.user.id);
+        if (!outcome) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "That account could not be deleted." });
+        const cookieOptions = getSessionCookieOptions(ctx.req);
+        ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
+        return outcome;
+      }),
   }),
 
   challenges: router({
@@ -261,16 +283,21 @@ export const appRouter = router({
       if (!item || item.challenge.challengedId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "This challenge is not for you." });
       if (item.challenge.status !== "OPEN") throw new TRPCError({ code: "BAD_REQUEST", message: "You already answered this challenge." });
       await db.update(challenges).set({ challengedPosition: input.position, challengedConfidence: input.confidence, status: "ACCEPTED" }).where(eq(challenges.id, input.id));
-      const responder = ctx.user.username ? `@${ctx.user.username}` : ctx.user.name || "Someone";
-      await createNotification({
-        userId: item.challenge.challengerId,
-        type: "CHALLENGE_ACCEPTED",
-        title: `${responder} took your challenge.`,
-        body: input.position,
-        linkPath: `/challenge/${input.id}`,
-        actorId: ctx.user.id,
-        challengeId: input.id,
-      });
+      // The challenger may have deleted their account since. Their side of the
+      // challenge is null then, and there is nobody left to notify — the
+      // response is still recorded, it just goes unannounced.
+      if (item.challenge.challengerId !== null) {
+        const responder = ctx.user.username ? `@${ctx.user.username}` : ctx.user.name || "Someone";
+        await createNotification({
+          userId: item.challenge.challengerId,
+          type: "CHALLENGE_ACCEPTED",
+          title: `${responder} took your challenge.`,
+          body: input.position,
+          linkPath: `/challenge/${input.id}`,
+          actorId: ctx.user.id,
+          challengeId: input.id,
+        });
+      }
       await trackEvent("challenge_accepted", ctx.user.id, { challengeId: input.id, confidence: input.confidence });
       return getChallengeById(input.id);
     }),

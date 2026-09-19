@@ -20,7 +20,9 @@ const redirectToLoginIfUnauthorized = (error: unknown) => {
 
   if (!isUnauthorized) return;
 
-  startLogin();
+  // Automatic: nobody pressed anything. The static demo declines to invent an
+  // account for it; the server build still redirects to OAuth as before.
+  startLogin({ automatic: true });
 };
 
 queryClient.getQueryCache().subscribe(event => {

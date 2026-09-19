@@ -9,6 +9,7 @@ import {
 } from "./receiptPreview";
 import { renderReceiptPng, renderReceiptSvg } from "./receiptImage";
 import { CARD_FORMATS } from "@shared/cardFormats";
+import { DELETED_AUTHOR_LABEL } from "@shared/accountDeletion";
 
 const pending = {
   id: 4821,
@@ -37,6 +38,18 @@ describe("buildReceiptDescription", () => {
   it("falls back to a display name, then to a neutral noun", () => {
     expect(buildReceiptDescription(pending, { username: null, name: "Nia" })).toContain("Nia");
     expect(buildReceiptDescription(pending, null)).toContain("Someone");
+  });
+
+  it("names a deleted author generically, never by a surviving handle", () => {
+    const orphan = { ...pending, userId: null };
+    const description = buildReceiptDescription(orphan, { username: "nia", name: "Nia" });
+    expect(description).toContain(DELETED_AUTHOR_LABEL);
+    expect(description).not.toContain("@nia");
+    expect(description).not.toContain("Nia");
+  });
+
+  it("still names a live author when the receipt carries their id", () => {
+    expect(buildReceiptDescription({ ...pending, userId: 7 }, { username: "nia", name: "Nia" })).toContain("@nia");
   });
 
   it("leads with the resolution date while the receipt is open", () => {

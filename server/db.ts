@@ -1,6 +1,6 @@
-import { and, asc, count, desc, eq, gte, inArray, isNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, receipts, dailyChallenges, challenges, achievements, dailyActivity, notifications, analyticsEvents, receiptInteractions, receiptReports, moderationActions } from "../drizzle/schema";
+import { InsertUser, users, receipts, dailyChallenges, challenges, achievements, dailyActivity, notifications, analyticsEvents, receiptInteractions, receiptReports, moderationActions, retiredUsernames } from "../drizzle/schema";
 import type { InteractionType } from "@shared/interactionPolicy";
 import {
   MAX_REPORTS_PER_DAY,
@@ -10,6 +10,7 @@ import {
   type ReportReason,
   type ReportStatus,
 } from "@shared/moderation";
+import { normalizeUsername } from "@shared/accountDeletion";
 import { ENV } from "./_core/env";
 
 const RESOLVED_STATUSES: string[] = ["RIGHT", "WRONG", "PARTIALLY RIGHT"];
@@ -527,6 +528,22 @@ export async function getDerivedCount(receiptId: number) {
  * something unresolved, so nothing has to be manufactured to bring them back.
  * Served by the (visibility, status, resolutionDate) index.
  */
+/**
+ * What "resolving soon" means, as one condition.
+ *
+ * Public, not hidden, still open, due in the future — and still owned by
+ * somebody. Only the author may resolve a Receipt, so one whose author deleted
+ * their account never will be; listing it here would promise an answer that is
+ * not coming.
+ */
+export function resolvingSoonWhere(now: Date) {
+  return publicReceiptWhere(
+    inArray(receipts.status, ["PENDING", "LOCKED"]),
+    gte(receipts.resolutionDate, now),
+    isNotNull(receipts.userId),
+  );
+}
+
 export async function getResolvingSoon(options: { limit?: number; now?: Date } = {}) {
   const limit = Math.min(Math.max(options.limit ?? 12, 1), 50);
   const db = await getDb();
@@ -536,12 +553,7 @@ export async function getResolvingSoon(options: { limit?: number; now?: Date } =
     .select({ receipt: receipts, user: users })
     .from(receipts)
     .leftJoin(users, eq(receipts.userId, users.id))
-    .where(
-      publicReceiptWhere(
-        inArray(receipts.status, ["PENDING", "LOCKED"]),
-        gte(receipts.resolutionDate, now),
-      ),
-    )
+    .where(resolvingSoonWhere(now))
     .orderBy(asc(receipts.resolutionDate))
     .limit(limit);
   return rows.map((row) => ({ receipt: row.receipt, user: toPublicUser(row.user) }));
@@ -818,4 +830,139 @@ export async function applyModerationAction(input: {
   });
 
   return { receiptId: input.receiptId, moderationStatus: resultingStatus, reportsClosed };
+}
+
+// ---------------------------------------------------------------------------
+// Account deletion
+// ---------------------------------------------------------------------------
+
+/** Whether this username belonged to an account that has since been deleted. */
+export async function isUsernameRetired(username: string) {
+  const db = await getDb();
+  if (!db) return false;
+  const rows = await db
+    .select({ id: retiredUsernames.id })
+    .from(retiredUsernames)
+    .where(eq(retiredUsernames.username, normalizeUsername(username)))
+    .limit(1);
+  return rows.length > 0;
+}
+
+/** Whether a username may be claimed: not held by anyone, and not retired. */
+export async function isUsernameAvailable(username: string, forUserId: number) {
+  const existing = await getUserByUsername(username);
+  if (existing && existing.id !== forUserId) return false;
+  return !(await isUsernameRetired(username));
+}
+
+/**
+ * Deletes an account and severs every reference to it.
+ *
+ * What survives is what other people took part in: public Receipts they
+ * responded to, the counts on them, the challenges they answered, and the
+ * moderation record. What goes is the account and every thread back to it.
+ *
+ * The author reference becomes NULL rather than pointing at a stand-in, so
+ * nothing groups the deleted person's Receipts together — `receipts.userId`
+ * is public, and any surviving id would be exactly the stable pseudonym this
+ * is meant to prevent.
+ *
+ * Order matters: every reference is cleared before the `users` row goes, so a
+ * failure part-way leaves orphans pointing at a live account rather than a
+ * missing one.
+ */
+export async function deleteAccount(userId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const user = await getUserById(userId);
+  if (!user) return null;
+
+  // Private Receipts are account data, not public record, so they go. The one
+  // exception is a private Receipt that anchors a challenge: deleting it would
+  // destroy the other party's position and confidence along with it, and those
+  // are not this person's to erase. Those are anonymised and stay PRIVATE, so
+  // they remain absent from every public surface.
+  const ownRows = await db
+    .select({ id: receipts.id, visibility: receipts.visibility })
+    .from(receipts)
+    .where(eq(receipts.userId, userId));
+  const privateIds = ownRows.filter((row) => row.visibility === "PRIVATE").map((row) => row.id);
+  // A private Receipt is kept — detached, and still PRIVATE, so absent from
+  // every public surface — when another record depends on it:
+  //
+  //  - a challenge, whose other party's position and confidence are not this
+  //    person's to erase, and
+  //  - a report or a moderation decision, because that evidence is never
+  //    deleted and would be unreadable pointing at a Receipt that is gone.
+  //
+  // Neither should be reachable for a private Receipt through the current API,
+  // but deletion is irreversible, so it checks rather than assumes.
+  const referenced = privateIds.length
+    ? new Set(
+        [
+          ...(await db.select({ id: challenges.receiptId }).from(challenges).where(inArray(challenges.receiptId, privateIds))),
+          ...(await db.select({ id: receiptReports.receiptId }).from(receiptReports).where(inArray(receiptReports.receiptId, privateIds))),
+          ...(await db.select({ id: moderationActions.receiptId }).from(moderationActions).where(inArray(moderationActions.receiptId, privateIds))),
+        ].map((row) => row.id),
+      )
+    : new Set<number>();
+  const deletableIds = privateIds.filter((id) => !referenced.has(id));
+
+  if (deletableIds.length) {
+    // Responses to a Receipt that is about to disappear. Unlike reports and
+    // audit rows these are not evidence of anything, so they go with it.
+    await db.delete(receiptInteractions).where(inArray(receiptInteractions.receiptId, deletableIds));
+    await db.update(receipts).set({ derivedFromId: null }).where(inArray(receipts.derivedFromId, deletableIds));
+    await db.delete(receipts).where(inArray(receipts.id, deletableIds));
+  }
+
+  // Everything still authored by them — public, plus any private Receipt held
+  // back above — loses its author.
+  await db.update(receipts).set({ userId: null }).where(eq(receipts.userId, userId));
+  // Receipts by other people that named this person as the challenged party.
+  await db.update(receipts).set({ challengeUserId: null }).where(eq(receipts.challengeUserId, userId));
+
+  // Their responses stay so other people's counts do not silently drop.
+  await db.update(receiptInteractions).set({ userId: null }).where(eq(receiptInteractions.userId, userId));
+
+  // Each side of a challenge is cleared independently; the other party keeps
+  // their words, their confidence and the record that it happened.
+  await db.update(challenges).set({ challengerId: null }).where(eq(challenges.challengerId, userId));
+  await db.update(challenges).set({ challengedId: null }).where(eq(challenges.challengedId, userId));
+
+  // Their inbox goes. So does anyone else's notification *about* them: the
+  // title is built as literal text ("@nia challenged you."), so the handle
+  // would survive the account otherwise.
+  await db.delete(notifications).where(eq(notifications.userId, userId));
+  await db.delete(notifications).where(eq(notifications.actorId, userId));
+
+  // Aggregates survive, the person does not.
+  await db.update(analyticsEvents).set({ userId: null }).where(eq(analyticsEvents.userId, userId));
+
+  // Purely account-level: nothing public reads either of these.
+  await db.delete(achievements).where(eq(achievements.userId, userId));
+  await db.delete(dailyActivity).where(eq(dailyActivity.userId, userId));
+
+  // Moderation records are evidence about other people's content and outlive
+  // any one participant — including a moderator who closes their own account.
+  await db.update(receiptReports).set({ reporterId: null }).where(eq(receiptReports.reporterId, userId));
+  await db.update(receiptReports).set({ resolvedBy: null }).where(eq(receiptReports.resolvedBy, userId));
+  await db.update(moderationActions).set({ moderatorId: null }).where(eq(moderationActions.moderatorId, userId));
+
+  // The handle is retired before the row goes, so it can never be claimed
+  // again by anyone — including the same person signing up afresh.
+  if (user.username) {
+    await db
+      .insert(retiredUsernames)
+      .values({ username: normalizeUsername(user.username) })
+      .onDuplicateKeyUpdate({ set: { username: normalizeUsername(user.username) } });
+  }
+
+  await db.delete(users).where(eq(users.id, userId));
+
+  return {
+    deletedPrivateReceipts: deletableIds.length,
+    anonymizedReceipts: ownRows.length - deletableIds.length,
+    usernameRetired: Boolean(user.username),
+  };
 }
