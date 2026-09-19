@@ -2,13 +2,14 @@ import { startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 import { DEMO_RECEIPTS, CATEGORIES, type Category } from "@shared/seed";
-import { Activity, ArrowRight, BarChart3, Bell, Check, ChevronRight, Clock3, Copy, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, Sparkles, Target, Trophy, UserRound, X, Zap } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, Bell, Heart, Check, ChevronRight, Clock3, Copy, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, Sparkles, Target, Trophy, UserRound, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, Route, Router as WouterRouter, Switch, useLocation, useRoute } from "wouter";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
+import { INTERACTION_COPY, SEMANTIC_TYPES, SEMANTIC_TYPE_COPY, defaultSemanticTypeFor, interactionsFor, resolveSemanticType, type SemanticType } from "@shared/interactionPolicy";
 import { SHARE_TARGETS } from "@/lib/sharing/adapters";
 import { availableTargets, runShare, type ShareContext } from "@/lib/sharing/core";
 import { IS_STATIC_DEMO } from "@/lib/staticDemo";
@@ -170,11 +171,79 @@ function Create() {
   const [resolutionDate, setResolutionDate] = useState(() => new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10));
   const [confidence, setConfidence] = useState(80);
   const [visibility, setVisibility] = useState<"PUBLIC" | "PRIVATE">("PUBLIC");
+  // The author decides what kind of statement this is. The category only
+  // suggests a starting point, and only until they touch the control.
+  // A ME TOO suggests the same kind as the receipt it follows; otherwise the
+  // category suggests one. Either way the author can change it.
+  const [semanticType, setSemanticType] = useState<SemanticType>(() => {
+    const hinted = new URLSearchParams(window.location.search).get("kind");
+    return (SEMANTIC_TYPES as readonly string[]).includes(hinted ?? "")
+      ? (hinted as SemanticType)
+      : defaultSemanticTypeFor("LIFE");
+  });
+  // A hinted kind is already the author's context, so the category should not
+  // overwrite it when they pick one.
+  const [typeTouched, setTypeTouched] = useState(() =>
+    (SEMANTIC_TYPES as readonly string[]).includes(new URLSearchParams(window.location.search).get("kind") ?? ""),
+  );
   const [challengeUsername, setChallengeUsername] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  // ME TOO arrives here with the original's text and a link back to it.
+  const [search] = useState(() => new URLSearchParams(window.location.search));
+  const derivedFromId = Number(search.get("from")) || undefined;
   const mutation = trpc.receipts.create.useMutation({ onSuccess: (receipt) => { toast.success("Receipt printed."); navigate(`/receipt/${receipt.id}`); } });
-  const submit = () => { if (!isAuthenticated) return startLogin(); if (!confirmed) return; mutation.mutate({ prediction, category, resolutionDate: new Date(`${resolutionDate}T23:59:00`), confidence, visibility, challengeUsername: challengeUsername || undefined }); };
-  return <Page eyebrow="CUSTOM RECEIPT" title="Say it with your chest." description="The prediction is yours. The timestamp is ours."><div className="create-layout"><div className="form-card"><label className="field-label">WHAT DO YOU THINK WILL HAPPEN?<textarea value={prediction} onChange={(event) => setPrediction(event.target.value)} maxLength={280} placeholder="I think…" rows={4} /><span className="char-count">{prediction.length}/280</span></label><div className="form-grid"><label className="field-label">CATEGORY<select value={category} onChange={(event) => setCategory(event.target.value as Category)}>{CATEGORIES.map((item) => <option key={item}>{item}</option>)}</select></label><label className="field-label">RESOLUTION DATE<input type="date" value={resolutionDate} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setResolutionDate(event.target.value)} /></label></div><div className="confidence-block form-confidence"><div className="confidence-head"><span>HOW CONFIDENT?</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>VIBES</span><span>ABSOLUTE FACT (TO ME)</span></div></div><label className="field-label">CHALLENGE SOMEONE <span className="optional">OPTIONAL</span><input value={challengeUsername} onChange={(event) => setChallengeUsername(event.target.value)} placeholder="@username" /></label><div className="visibility-toggle"><button className={visibility === "PUBLIC" ? "active" : ""} onClick={() => setVisibility("PUBLIC")}>PUBLIC <span>Shareable link</span></button><button className={visibility === "PRIVATE" ? "active" : ""} onClick={() => setVisibility("PRIVATE")}>PRIVATE <span>Just for you</span></button></div><label className="confirm-row"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>Once you print it, you can’t edit it. I understand future-me may disagree.</span></label><button className="button button-dark button-wide" disabled={!prediction.trim() || !confirmed || mutation.isPending} onClick={submit}><LockKeyhole size={17} /> {mutation.isPending ? "PRINTING…" : "LOCK IT IN"}</button>{mutation.error && <div className="error-message">{mutation.error.message}</div>}</div><div className="preview-column"><span className="eyebrow">LIVE PREVIEW</span><ReceiptPaper receipt={{ id: "4821", receiptNumber: "004821", prediction: prediction || "Your prediction goes here.", category, confidence, status: "PENDING", createdAt: new Date(), resolutionDate }} /><p className="preview-caption">This is what your future self will find.</p></div></div></Page>;
+  const submit = () => { if (!isAuthenticated) return startLogin(); if (!confirmed) return; mutation.mutate({ prediction, category, resolutionDate: new Date(`${resolutionDate}T23:59:00`), confidence, visibility, challengeUsername: challengeUsername || undefined, semanticType, derivedFromId }); };
+  return <Page eyebrow="CUSTOM RECEIPT" title="Say it with your chest." description="The prediction is yours. The timestamp is ours."><div className="create-layout"><div className="form-card">{derivedFromId ? <div className="derived-note"><span className="eyebrow">YOUR OWN CALL</span><p>You're writing your own receipt after someone else's. Say it your way — the confidence and the date are yours.</p></div> : null}<div className="type-picker"><span className="field-label type-picker-label">WHAT KIND OF PREDICTION IS THIS?</span><div className="type-options">{SEMANTIC_TYPES.map((item) => <button key={item} type="button" className={semanticType === item ? "active" : ""} onClick={() => { setSemanticType(item); setTypeTouched(true); }}><strong>{SEMANTIC_TYPE_COPY[item].label}</strong><span>{SEMANTIC_TYPE_COPY[item].blurb}</span></button>)}</div></div><label className="field-label">WHAT DO YOU THINK WILL HAPPEN?<textarea value={prediction} onChange={(event) => setPrediction(event.target.value)} maxLength={280} placeholder="I think…" rows={4} /><span className="char-count">{prediction.length}/280</span></label><div className="form-grid"><label className="field-label">CATEGORY<select value={category} onChange={(event) => { const next = event.target.value as Category; setCategory(next); if (!typeTouched) setSemanticType(defaultSemanticTypeFor(next)); }}>{CATEGORIES.map((item) => <option key={item}>{item}</option>)}</select></label><label className="field-label">RESOLUTION DATE<input type="date" value={resolutionDate} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setResolutionDate(event.target.value)} /></label></div><div className="confidence-block form-confidence"><div className="confidence-head"><span>HOW CONFIDENT?</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>VIBES</span><span>ABSOLUTE FACT (TO ME)</span></div></div><label className="field-label">CHALLENGE SOMEONE <span className="optional">OPTIONAL</span><input value={challengeUsername} onChange={(event) => setChallengeUsername(event.target.value)} placeholder="@username" /></label><div className="visibility-toggle"><button className={visibility === "PUBLIC" ? "active" : ""} onClick={() => setVisibility("PUBLIC")}>PUBLIC <span>Shareable link</span></button><button className={visibility === "PRIVATE" ? "active" : ""} onClick={() => setVisibility("PRIVATE")}>PRIVATE <span>Just for you</span></button></div><label className="confirm-row"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>Once you print it, you can’t edit it. I understand future-me may disagree.</span></label><button className="button button-dark button-wide" disabled={!prediction.trim() || !confirmed || mutation.isPending} onClick={submit}><LockKeyhole size={17} /> {mutation.isPending ? "PRINTING…" : "LOCK IT IN"}</button>{mutation.error && <div className="error-message">{mutation.error.message}</div>}</div><div className="preview-column"><span className="eyebrow">LIVE PREVIEW</span><ReceiptPaper receipt={{ id: "4821", receiptNumber: "004821", prediction: prediction || "Your prediction goes here.", category, confidence, status: "PENDING", createdAt: new Date(), resolutionDate }} /><p className="preview-caption">This is what your future self will find.</p></div></div></Page>;
+}
+
+/**
+ * The actions a Receipt offers, decided by its semantic type.
+ *
+ * Nothing here branches on category, and no component decides for itself what a
+ * Receipt allows — the policy in shared/interactionPolicy.ts is the single
+ * source, and the server enforces the same rules.
+ *
+ * ME TOO is not among the counted interactions on purpose: it sends the person
+ * to write their own Receipt, carrying a link back to this one.
+ */
+function ReceiptActions({ receipt }: { receipt: any }) {
+  const { isAuthenticated } = useAuth();
+  const [, navigate] = useLocation();
+  const utils = trpc.useUtils();
+  const id = Number(receipt.id);
+  const semanticType = resolveSemanticType(receipt.semanticType);
+  const offered = interactionsFor(receipt.semanticType);
+  const { data } = trpc.receipts.interactions.useQuery({ id }, { enabled: Number.isFinite(id), retry: false });
+  const interact = trpc.receipts.interact.useMutation({
+    onSuccess: () => utils.receipts.interactions.invalidate({ id }),
+    onError: (error) => toast.error(error.message),
+  });
+
+  const press = (type: string) => {
+    if (!isAuthenticated) return startLogin();
+    // Pressing the active response again withdraws it.
+    interact.mutate({ id, type: data?.mine === type ? null : (type as any) });
+  };
+
+  // Writing your own Receipt, prefilled and linked, never auto-published.
+  const writeOwn = () => navigate(`/create?from=${id}&kind=${semanticType}`);
+
+  return <div className="receipt-actions">
+    <div className="action-row">
+      {offered.map((type) => {
+        const count = data?.counts?.[type] ?? 0;
+        const active = data?.mine === type;
+        return <button key={type} className={`action-button ${type.toLowerCase()} ${active ? "active" : ""}`} onClick={() => press(type)} disabled={interact.isPending}>
+          {type === "SUPPORT" ? <Heart size={15} /> : type === "AGREE" ? <Check size={15} /> : type === "DISAGREE" ? <X size={15} /> : <Sparkles size={15} />}
+          <span>{INTERACTION_COPY[type].label}</span>
+          {count > 0 && <b>{count}</b>}
+        </button>;
+      })}
+      <button className="action-button metoo" onClick={writeOwn}><ReceiptText size={15} /> <span>Me too</span>{data?.derivedCount ? <b>{data.derivedCount}</b> : null}</button>
+    </div>
+    {semanticType === "PREDICTION" && <p className="action-note">Disagreeing is only the start — <button className="text-link inline" onClick={writeOwn}>put your own call on the record</button>.</p>}
+    {data?.derivedCount ? <p className="action-note">{data.derivedCount} {data.derivedCount === 1 ? "person has" : "people have"} written their own receipt after this one.</p> : null}
+  </div>;
 }
 
 /**
@@ -242,7 +311,7 @@ function ReceiptDetail() {
   }, [id, receipt]);
   const onShared = (method: string) =>
     track.mutate({ event: "receipt_shared", properties: { receiptId: id, method, surface: isPublic ? "public" : "owner" } });
-  return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><ShareSheet context={shareContext} onShared={onShared} />{!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && !isDue && <div className="resolve-box pending-box"><div><span className="eyebrow">NOT DUE YET</span><h3>Reality is still working on it.</h3><p className="muted">This receipt resolves {dateLabel(receipt.resolutionDate)}. You can record the result then — not before.</p></div><div className="pending-clock"><Clock3 size={26} /></div></div>}
+  return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><ReceiptActions receipt={receipt} /><ShareSheet context={shareContext} onShared={onShared} />{!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && !isDue && <div className="resolve-box pending-box"><div><span className="eyebrow">NOT DUE YET</span><h3>Reality is still working on it.</h3><p className="muted">This receipt resolves {dateLabel(receipt.resolutionDate)}. You can record the result then — not before.</p></div><div className="pending-clock"><Clock3 size={26} /></div></div>}
       {!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && isDue && <div className="resolve-box"><div><span className="eyebrow">TIME TO FACE THE MUSIC?</span><h3>How did it go?</h3></div><div className="resolve-actions"><button onClick={() => resolveMutation.mutate({ id, result: "RIGHT" })} className="result-button right">RIGHT</button><button onClick={() => resolveMutation.mutate({ id, result: "PARTIALLY RIGHT" })} className="result-button partial">PARTIAL</button><button onClick={() => resolveMutation.mutate({ id, result: "WRONG" })} className="result-button wrong">WRONG</button><button onClick={() => resolveMutation.mutate({ id, result: "TOO EARLY" })} className="result-button early">TOO EARLY</button></div></div>}</div><aside className="detail-aside"><div className="share-hook"><Sparkles size={20} /><span className="eyebrow">YOUR TURN</span><h3>What do <em>you</em> think will happen?</h3><ButtonLink href="/create">MAKE YOUR RECEIPT</ButtonLink></div><div className="detail-meta"><span>RECEIPT DETAILS</span><dl><dt>CREATOR</dt><dd>{user?.username || user?.name || "You"}</dd><dt>STATUS</dt><dd className={statusClass(receipt.status)}>{receipt.status}</dd><dt>CONFIDENCE</dt><dd>{receipt.confidence}%</dd><dt>RESOLVES</dt><dd>{dateLabel(receipt.resolutionDate)}</dd></dl></div></aside></> : <div className="empty-state"><ReceiptText size={34} /><h3>That receipt is missing.</h3><p>It may be private, or the number may have been typed with too much confidence.</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}</div></Page>;
 }
 
@@ -296,10 +365,13 @@ function ChallengeDetail() {
  */
 function Feed() {
   const [category, setCategory] = useState<Category | null>(null);
+  const [mode, setMode] = useState<"NEWEST" | "SOON">("NEWEST");
   const [pages, setPages] = useState<number[]>([]);
   const cursor = pages[pages.length - 1];
   const input = useMemo(() => ({ ...(category ? { category } : {}), ...(cursor ? { cursor } : {}) }), [category, cursor]);
-  const { data, isLoading, isFetching, error } = trpc.receipts.feed.useQuery(input);
+  const { data, isLoading, isFetching, error } = trpc.receipts.feed.useQuery(input, { enabled: mode === "NEWEST" });
+  // Resolving soon is a bounded window, not an archive, so it does not page.
+  const soon = trpc.receipts.resolvingSoon.useQuery({ limit: 24 }, { enabled: mode === "SOON" });
   const [items, setItems] = useState<any[]>([]);
 
   // Pages accumulate; changing the filter starts over.
@@ -312,12 +384,29 @@ function Feed() {
     });
   }, [data]);
 
+  const soonItems = soon.data ?? [];
   const chip = (value: Category | null, label: string) => (
     <button key={label} className={category === value ? "active" : ""} onClick={() => setCategory(value)}>{label}</button>
   );
 
   return <Page eyebrow="PUBLIC RECEIPTS" title="The record so far." description="Every public call, newest first. Somebody is going to be wrong.">
-    <div className="feed-filters">{chip(null, "ALL")}{CATEGORIES.map((item) => chip(item, item))}</div>
+    <div className="feed-modes">
+      <button className={mode === "NEWEST" ? "active" : ""} onClick={() => setMode("NEWEST")}>NEWEST</button>
+      <button className={mode === "SOON" ? "active" : ""} onClick={() => setMode("SOON")}><Clock3 size={13} /> RESOLVING SOON</button>
+    </div>
+    {mode === "NEWEST" && <div className="feed-filters">{chip(null, "ALL")}{CATEGORIES.map((item) => chip(item, item))}</div>}
+    {mode === "SOON" ? (
+      soon.error ? <div className="empty-state"><ReceiptText size={32} /><h3>Could not load what's resolving.</h3><p>{soon.error.message}</p></div>
+      : soon.isLoading ? <div className="loading-state">Looking at the calendar…</div>
+      : soonItems.length ? <>
+        <div className="feed-grid">{soonItems.map((item: any) => <Link href={`/r/${item.receipt.id}`} key={item.receipt.id} className="feed-item">
+          <ReceiptPaper receipt={{ ...item.receipt, receiptNumber: String(item.receipt.id).padStart(6, "0") }} compact />
+          <span className="feed-caller">{item.user?.username ? `@${item.user.username}` : item.user?.name || "Anonymous"} · resolves {dateLabel(item.receipt.resolutionDate)}</span>
+        </Link>)}</div>
+        <div className="feed-end">REALITY IS STILL WORKING ON THESE.</div>
+      </>
+      : <div className="empty-state"><Clock3 size={32} /><h3>Nothing is due yet.</h3><p>No open public receipts are waiting on a resolution date.</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>
+    ) : <>
     {error ? <div className="empty-state"><ReceiptText size={32} /><h3>The feed could not load.</h3><p>{error.message}</p></div>
       : items.length ? <>
         <div className="feed-grid">{items.map((item) => <Link href={`/r/${item.receipt.id}`} key={item.receipt.id} className="feed-item">
@@ -329,6 +418,7 @@ function Feed() {
       </>
       : isLoading || isFetching ? <div className="loading-state">Loading receipts…</div>
       : <div className="empty-state"><ReceiptText size={32} /><h3>{category ? `No public receipts in ${category} yet.` : "No public receipts yet."}</h3><p>{category ? "Try another category, or be the first." : "Be the first to put something on the record."}</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}
+    </>}
   </Page>;
 }
 

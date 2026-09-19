@@ -1,5 +1,6 @@
 import { COOKIE_NAME } from "@shared/const";
 import { CATEGORIES, DAILY_PROMPTS, getTodayPrompt, formatReceiptNumber } from "@shared/seed";
+import { INTERACTION_TYPES, SEMANTIC_TYPES, allowsInteraction, defaultSemanticTypeFor, resolveSemanticType } from "@shared/interactionPolicy";
 import { and, desc, eq } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
@@ -7,9 +8,11 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { challenges, dailyChallenges, receipts, users } from "../drizzle/schema";
-import { canResolveAt, countUnreadNotifications, createNotification, recordUserReturn, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
+import { canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getDerivedCount, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
 
 const categorySchema = z.enum(CATEGORIES);
+const semanticTypeSchema = z.enum(SEMANTIC_TYPES);
+const interactionSchema = z.enum(INTERACTION_TYPES);
 const statusSchema = z.enum(["RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]);
 
 // A closed vocabulary keeps the events table queryable — an open string field
@@ -111,8 +114,45 @@ export const appRouter = router({
           .optional(),
       )
       .query(({ input }) => getPublicFeed(input ?? {})),
+    /** Open public Receipts, soonest resolution first. */
+    resolvingSoon: publicProcedure
+      .input(z.object({ limit: z.number().int().min(1).max(50).optional() }).optional())
+      .query(({ input }) => getResolvingSoon({ limit: input?.limit })),
+    /** Counts per interaction type, the viewer's own response, and ME TOO lineage. */
+    interactions: publicProcedure.input(z.object({ id: z.number().int().positive() })).query(async ({ ctx, input }) => {
+      const result = await getPublicReceipt(input.id);
+      if (!result?.receipt) throw new TRPCError({ code: "NOT_FOUND", message: "That receipt is private or no longer exists." });
+      return {
+        counts: await getInteractionCounts(input.id),
+        mine: ctx.user ? await getViewerInteraction(input.id, ctx.user.id) : null,
+        derivedCount: await getDerivedCount(input.id),
+      };
+    }),
+    /**
+     * Records or withdraws a response. The Receipt's semantic type decides what
+     * is acceptable, and this check is the authoritative one — the client's
+     * buttons are a convenience, not the rule.
+     */
+    interact: protectedProcedure
+      .input(z.object({ id: z.number().int().positive(), type: interactionSchema.nullable() }))
+      .mutation(async ({ ctx, input }) => {
+        const result = await getPublicReceipt(input.id);
+        if (!result?.receipt) throw new TRPCError({ code: "NOT_FOUND", message: "That receipt is private or no longer exists." });
+        if (input.type === null) {
+          await clearInteraction(input.id, ctx.user.id);
+          return { counts: await getInteractionCounts(input.id), mine: null };
+        }
+        if (!allowsInteraction(result.receipt.semanticType, input.type)) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `A ${resolveSemanticType(result.receipt.semanticType).toLowerCase()} receipt does not take that response.`,
+          });
+        }
+        await setInteraction(input.id, ctx.user.id, input.type);
+        return { counts: await getInteractionCounts(input.id), mine: input.type };
+      }),
     mine: protectedProcedure.query(({ ctx }) => listReceiptsForUser(ctx.user.id)),
-    create: protectedProcedure.input(z.object({ prediction: z.string().trim().min(8).max(280), category: categorySchema, resolutionDate: z.coerce.date(), confidence: z.number().int().min(0).max(100), visibility: z.enum(["PUBLIC", "PRIVATE"]).default("PUBLIC"), challengeUsername: z.string().trim().max(40).optional() })).mutation(async ({ ctx, input }) => {
+    create: protectedProcedure.input(z.object({ prediction: z.string().trim().min(8).max(280), category: categorySchema, resolutionDate: z.coerce.date(), confidence: z.number().int().min(0).max(100), visibility: z.enum(["PUBLIC", "PRIVATE"]).default("PUBLIC"), challengeUsername: z.string().trim().max(40).optional(), semanticType: semanticTypeSchema.optional(), derivedFromId: z.number().int().positive().optional() })).mutation(async ({ ctx, input }) => {
       if (input.resolutionDate.getTime() <= Date.now()) throw new TRPCError({ code: "BAD_REQUEST", message: "Resolution date must be in the future." });
       if (input.challengeUsername && input.challengeUsername.toLowerCase() === (ctx.user.username ?? "").toLowerCase()) throw new TRPCError({ code: "BAD_REQUEST", message: "Challenge someone else, not yourself." });
       const db = await getDb();
@@ -122,7 +162,14 @@ export const appRouter = router({
         challengedUser = await getUserByUsername(input.challengeUsername);
         if (!challengedUser) throw new TRPCError({ code: "NOT_FOUND", message: "No user with that username yet." });
       }
-      const result = await db.insert(receipts).values({ userId: ctx.user.id, prediction: input.prediction, category: input.category, confidence: input.confidence, resolutionDate: input.resolutionDate, status: "PENDING", visibility: input.visibility, challengeUserId: challengedUser?.id });
+      // Lineage is only recorded when the parent is a Receipt this user could
+      // actually see, so it cannot be used to probe for private Receipts.
+      let derivedFromId: number | undefined;
+      if (input.derivedFromId) {
+        const parent = await getPublicReceipt(input.derivedFromId);
+        if (parent?.receipt) derivedFromId = parent.receipt.id;
+      }
+      const result = await db.insert(receipts).values({ userId: ctx.user.id, prediction: input.prediction, category: input.category, confidence: input.confidence, resolutionDate: input.resolutionDate, status: "PENDING", visibility: input.visibility, challengeUserId: challengedUser?.id, semanticType: input.semanticType ?? defaultSemanticTypeFor(input.category), derivedFromId });
       const receiptId = Number(result[0].insertId);
       if (challengedUser) {
         const inserted = await db.insert(challenges).values({ receiptId, challengerId: ctx.user.id, challengedId: challengedUser.id, challengerPosition: input.prediction, challengerConfidence: input.confidence, status: "OPEN" });
@@ -142,7 +189,7 @@ export const appRouter = router({
       await recordAchievement(ctx.user.id, "CALLER");
       const receipt = await getReceiptById(receiptId);
       if (!receipt) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Receipt was not created" });
-      await trackEvent("receipt_created", ctx.user.id, { receiptId, category: input.category, confidence: input.confidence, visibility: input.visibility, challenged: Boolean(challengedUser) });
+      await trackEvent("receipt_created", ctx.user.id, { receiptId, category: input.category, confidence: input.confidence, visibility: input.visibility, challenged: Boolean(challengedUser), semanticType: input.semanticType ?? defaultSemanticTypeFor(input.category), derived: Boolean(derivedFromId) });
       return receipt;
     }),
     resolve: protectedProcedure.input(z.object({ id: z.number().int().positive(), result: statusSchema, note: z.string().trim().max(280).optional() })).mutation(async ({ ctx, input }) => {

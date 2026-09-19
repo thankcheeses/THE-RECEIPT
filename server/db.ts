@@ -1,6 +1,7 @@
-import { and, count, desc, eq, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, receipts, dailyChallenges, challenges, achievements, dailyActivity, notifications, analyticsEvents } from "../drizzle/schema";
+import { InsertUser, users, receipts, dailyChallenges, challenges, achievements, dailyActivity, notifications, analyticsEvents, receiptInteractions } from "../drizzle/schema";
+import type { InteractionType } from "@shared/interactionPolicy";
 import { ENV } from "./_core/env";
 
 const RESOLVED_STATUSES: string[] = ["RIGHT", "WRONG", "PARTIALLY RIGHT"];
@@ -414,6 +415,103 @@ export async function recordUserReturn(user: { id: number; lastActiveDate?: Date
   } catch (error) {
     console.warn("[Analytics] Failed to record return visit:", error);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Receipt interactions
+// ---------------------------------------------------------------------------
+
+/**
+ * Records one person's response to a Receipt, replacing any previous one.
+ *
+ * The caller is responsible for checking the interaction against the Receipt's
+ * semantic type first; this only writes.
+ */
+export async function setInteraction(receiptId: number, userId: number, type: InteractionType) {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .insert(receiptInteractions)
+    .values({ receiptId, userId, type })
+    .onDuplicateKeyUpdate({ set: { type, createdAt: new Date() } });
+}
+
+/** Withdraws a response. Pressing the same button again means "never mind". */
+export async function clearInteraction(receiptId: number, userId: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db
+    .delete(receiptInteractions)
+    .where(and(eq(receiptInteractions.receiptId, receiptId), eq(receiptInteractions.userId, userId)));
+}
+
+/** Totals per interaction type. Types with no responses are absent, not zero. */
+export async function getInteractionCounts(receiptId: number) {
+  const db = await getDb();
+  if (!db) return {} as Record<string, number>;
+  const rows = await db
+    .select({ type: receiptInteractions.type, total: count() })
+    .from(receiptInteractions)
+    .where(eq(receiptInteractions.receiptId, receiptId))
+    .groupBy(receiptInteractions.type);
+  return Object.fromEntries(rows.map((row) => [row.type, Number(row.total)])) as Record<string, number>;
+}
+
+export async function getViewerInteraction(receiptId: number, userId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db
+    .select({ type: receiptInteractions.type })
+    .from(receiptInteractions)
+    .where(and(eq(receiptInteractions.receiptId, receiptId), eq(receiptInteractions.userId, userId)))
+    .limit(1);
+  return rows[0]?.type ?? null;
+}
+
+/**
+ * How many Receipts were written after this one ("ME TOO"). Counts authored
+ * Receipts, not reactions — which is the whole point of the distinction.
+ */
+export async function getDerivedCount(receiptId: number) {
+  const db = await getDb();
+  if (!db) return 0;
+  const rows = await db
+    .select({ total: count() })
+    .from(receipts)
+    .where(and(eq(receipts.derivedFromId, receiptId), eq(receipts.visibility, "PUBLIC")));
+  return Number(rows[0]?.total ?? 0);
+}
+
+// ---------------------------------------------------------------------------
+// Resolving soon
+// ---------------------------------------------------------------------------
+
+/**
+ * Open public Receipts whose resolution date is closest, soonest first.
+ *
+ * This is the product's own source of anticipation: the person already has
+ * something unresolved, so nothing has to be manufactured to bring them back.
+ * Served by the (visibility, status, resolutionDate) index.
+ */
+export async function getResolvingSoon(options: { limit?: number; now?: Date } = {}) {
+  const limit = Math.min(Math.max(options.limit ?? 12, 1), 50);
+  const db = await getDb();
+  if (!db) return [];
+  const now = options.now ?? new Date();
+  const rows = await db
+    .select({ receipt: receipts, user: users })
+    .from(receipts)
+    .leftJoin(users, eq(receipts.userId, users.id))
+    .where(
+      and(
+        eq(receipts.visibility, "PUBLIC"),
+        inArray(receipts.status, ["PENDING", "LOCKED"]),
+        gte(receipts.resolutionDate, now),
+      ),
+    )
+    .orderBy(asc(receipts.resolutionDate))
+    .limit(limit);
+  return rows.map((row) => ({ receipt: row.receipt, user: toPublicUser(row.user) }));
 }
 
 // ---------------------------------------------------------------------------

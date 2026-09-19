@@ -10,6 +10,7 @@
  * real server over httpBatchLink.
  */
 import { CATEGORIES, DAILY_PROMPTS, getTodayPrompt, type Category, type ReceiptStatus } from "@shared/seed";
+import { allowsInteraction, defaultSemanticTypeFor, resolveSemanticType, type InteractionType, type SemanticType } from "@shared/interactionPolicy";
 
 export const IS_STATIC_DEMO = import.meta.env.VITE_STATIC_DEMO === "true";
 
@@ -49,6 +50,8 @@ type DemoReceipt = {
   challengeUserId: number | null;
   dailyChallengeId: number | null;
   resolvedAt: Date | null;
+  semanticType: SemanticType | null;
+  derivedFromId: number | null;
 };
 
 type DemoChallenge = {
@@ -90,6 +93,8 @@ type DemoState = {
   dailyActivity: string[];
   /** Locally recorded analytics, so the event calls are exercised, not swallowed. */
   events: Array<{ event: string; properties: unknown; at: Date }>;
+  /** One response per receipt in this browser, keyed by receipt id. */
+  interactions: Record<string, InteractionType>;
   nextReceiptId: number;
   nextChallengeId: number;
   nextNotificationId: number;
@@ -104,6 +109,7 @@ const emptyState = (): DemoState => ({
   notifications: [],
   dailyActivity: [],
   events: [],
+  interactions: {},
   nextReceiptId: 4822,
   nextChallengeId: 1,
   nextNotificationId: 1,
@@ -362,6 +368,8 @@ const handlers: Record<string, Handler> = {
         challengeUserId: null,
         dailyChallengeId: daily.id,
         resolvedAt: null,
+        semanticType: "PREDICTION",
+        derivedFromId: null,
       };
       state.receipts.push(receipt);
       const today = startOfDay(new Date());
@@ -407,6 +415,45 @@ const handlers: Record<string, Handler> = {
       nextCursor: all.length > limit ? items[items.length - 1]?.id ?? null : null,
     };
   },
+  "receipts.resolvingSoon": (input?: { limit?: number }) => {
+    const state = readState();
+    const limit = Math.min(Math.max(input?.limit ?? 12, 1), 50);
+    const now = Date.now();
+    return state.receipts
+      .filter((receipt) => receipt.visibility === "PUBLIC" && ["PENDING", "LOCKED"].includes(receipt.status))
+      .filter((receipt) => new Date(receipt.resolutionDate).getTime() >= now)
+      .sort((a, b) => new Date(a.resolutionDate).getTime() - new Date(b.resolutionDate).getTime())
+      .slice(0, limit)
+      .map((receipt) => ({ receipt, user: publicUser(state.user) }));
+  },
+  "receipts.interactions": (input: { id: number }) => {
+    const state = readState();
+    const receipt = state.receipts.find((item) => item.id === input.id && item.visibility === "PUBLIC");
+    if (!receipt) throw new Error("That receipt is private or no longer exists.");
+    const mine = state.interactions[String(input.id)] ?? null;
+    return {
+      // A single-browser demo has one responder, so a count is only ever this
+      // person's own response. Reported as such rather than invented.
+      counts: mine ? { [mine]: 1 } : {},
+      mine,
+      derivedCount: state.receipts.filter((item) => item.derivedFromId === input.id && item.visibility === "PUBLIC").length,
+    };
+  },
+  "receipts.interact": (input: { id: number; type: InteractionType | null }) =>
+    mutate((state) => {
+      requireUser(state);
+      const receipt = state.receipts.find((item) => item.id === input.id && item.visibility === "PUBLIC");
+      if (!receipt) throw new Error("That receipt is private or no longer exists.");
+      if (input.type === null) {
+        delete state.interactions[String(input.id)];
+        return { counts: {}, mine: null };
+      }
+      if (!allowsInteraction(receipt.semanticType, input.type)) {
+        throw new Error(`A ${resolveSemanticType(receipt.semanticType).toLowerCase()} receipt does not take that response.`);
+      }
+      state.interactions[String(input.id)] = input.type;
+      return { counts: { [input.type]: 1 }, mine: input.type };
+    }),
   "receipts.mine": () => {
     const state = readState();
     return forUser(state, requireUser(state).id);
@@ -418,6 +465,8 @@ const handlers: Record<string, Handler> = {
     confidence: number;
     visibility: "PUBLIC" | "PRIVATE";
     challengeUsername?: string;
+    semanticType?: SemanticType;
+    derivedFromId?: number;
   }) =>
     mutate((state) => {
       const user = requireUser(state);
@@ -444,6 +493,11 @@ const handlers: Record<string, Handler> = {
         challengeUserId: input.challengeUsername ? -1 : null,
         dailyChallengeId: null,
         resolvedAt: null,
+        semanticType: input.semanticType ?? defaultSemanticTypeFor(input.category),
+        // Only a public parent can be linked, matching the server.
+        derivedFromId: input.derivedFromId && state.receipts.some((item) => item.id === input.derivedFromId && item.visibility === "PUBLIC")
+          ? input.derivedFromId
+          : null,
       };
       state.receipts.push(receipt);
       if (input.challengeUsername) {

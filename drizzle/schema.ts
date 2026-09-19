@@ -51,6 +51,14 @@ export const receipts = mysqlTable(
     challengeUserId: int("challengeUserId"),
     dailyChallengeId: int("dailyChallengeId"),
     resolvedAt: timestamp("resolvedAt"),
+    // Chosen by the author at creation; decides which interactions the Receipt
+    // offers. Nullable because Receipts written before this existed have no
+    // author choice to record — see LEGACY_SEMANTIC_TYPE in
+    // shared/interactionPolicy.ts for how they are read.
+    semanticType: mysqlEnum("semanticType", ["PREDICTION", "GOAL", "PERSONAL", "FUN"]),
+    // The Receipt this one was written after ("ME TOO"). The new Receipt is
+    // independently authored and locked; this only records where it came from.
+    derivedFromId: int("derivedFromId"),
   },
   // The public feed reads `visibility = PUBLIC` newest-first, optionally
   // narrowed by category. Without these it is a table scan per page.
@@ -58,6 +66,37 @@ export const receipts = mysqlTable(
     index("receipts_visibility_id").on(table.visibility, table.id),
     index("receipts_visibility_category_id").on(table.visibility, table.category, table.id),
     index("receipts_user_id").on(table.userId, table.id),
+    // "Resolving soon": open public Receipts ordered by when reality is due to
+    // answer them.
+    index("receipts_visibility_status_resolution").on(table.visibility, table.status, table.resolutionDate),
+    index("receipts_derived_from").on(table.derivedFromId),
+  ],
+);
+
+/**
+ * One person's recorded response to one Receipt.
+ *
+ * The type is stored explicitly rather than as a generic "reaction", because
+ * supporting a goal and agreeing with a claim are different statements that
+ * could never be separated again if they shared a counter. Which types a
+ * Receipt accepts is decided by its semantic type; the server enforces it.
+ *
+ * ME TOO is deliberately absent: it authors a Receipt, it is not a response.
+ */
+export const receiptInteractions = mysqlTable(
+  "receiptInteractions",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    receiptId: int("receiptId").notNull(),
+    userId: int("userId").notNull(),
+    type: mysqlEnum("type", ["AGREE", "DISAGREE", "SUPPORT", "REACT"]).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (table) => [
+    // One response per person per Receipt: agreeing and then disagreeing
+    // replaces the first answer rather than recording both.
+    uniqueIndex("receiptInteractions_receipt_user").on(table.receiptId, table.userId),
+    index("receiptInteractions_receipt_type").on(table.receiptId, table.type),
   ],
 );
 
@@ -133,6 +172,7 @@ export type Receipt = typeof receipts.$inferSelect;
 export type InsertReceipt = typeof receipts.$inferInsert;
 export type DailyChallenge = typeof dailyChallenges.$inferSelect;
 export type Challenge = typeof challenges.$inferSelect;
+export type ReceiptInteraction = typeof receiptInteractions.$inferSelect;
 export type Notification = typeof notifications.$inferSelect;
 export type DailyActivity = typeof dailyActivity.$inferSelect;
 export type AnalyticsEvent = typeof analyticsEvents.$inferSelect;

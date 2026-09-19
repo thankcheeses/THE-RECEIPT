@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added author-selected receipt kinds (Prediction, Goal, Personal, Fun) and a shared interaction policy that decides which responses a receipt offers. Goals and personal receipts take support rather than agreement or disagreement; the server enforces the same rule the client renders.
+- Added "Me too": a real, independently authored receipt that records which receipt it followed (`derivedFromId`), rather than a reaction counter.
+- Support and agreement are persisted as distinct interaction types in a new `receiptInteractions` table.
+- Added a "Resolving soon" feed mode over open public receipts, with a covering index.
+
 - Added a sharing abstraction with platform adapters: OS share sheet, copy link, composer intents for X, Bluesky, WhatsApp, Reddit and Facebook, and a receipt-image download for platforms that have no web intent. Nothing posts on the user's behalf.
 
 - Added a public feed at `/feed`: newest-first, category filters, keyset pagination, and empty/loading/error states, built on the existing public-receipt data.
