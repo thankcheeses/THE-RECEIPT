@@ -1,10 +1,34 @@
-import { and, asc, count, desc, eq, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, isNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, receipts, dailyChallenges, challenges, achievements, dailyActivity, notifications, analyticsEvents, receiptInteractions } from "../drizzle/schema";
+import { InsertUser, users, receipts, dailyChallenges, challenges, achievements, dailyActivity, notifications, analyticsEvents, receiptInteractions, receiptReports, moderationActions } from "../drizzle/schema";
 import type { InteractionType } from "@shared/interactionPolicy";
+import {
+  MAX_REPORTS_PER_DAY,
+  reportStatusAfter,
+  statusAfter,
+  type ModerationAction,
+  type ReportReason,
+  type ReportStatus,
+} from "@shared/moderation";
 import { ENV } from "./_core/env";
 
 const RESOLVED_STATUSES: string[] = ["RIGHT", "WRONG", "PARTIALLY RIGHT"];
+
+/**
+ * What it takes for a Receipt to be shown to the public: the author made it
+ * public, AND moderation has not taken it down.
+ *
+ * Every public-facing query composes this rather than writing the conditions
+ * out, so a new surface cannot accidentally ship without the moderation half.
+ * It is filtered in SQL, not after the fetch, so keyset pages stay full.
+ */
+export function publicReceiptWhere(...extra: Array<SQL | undefined>) {
+  return and(
+    eq(receipts.visibility, "PUBLIC"),
+    eq(receipts.moderationStatus, "VISIBLE"),
+    ...extra,
+  );
+}
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -108,17 +132,27 @@ export async function getReceiptById(id: number) {
   return result[0];
 }
 
+/**
+ * One public Receipt and the person who wrote it.
+ *
+ * The joined user is redacted here, not by the caller. This row reaches
+ * signed-out visitors through `receipts.publicById` and through the social
+ * preview, so the raw `users` row — openId, email, login method, role — must
+ * never leave this function.
+ */
 export async function getPublicReceipt(id: number) {
   const db = await getDb();
   if (!db) return undefined;
-  const result = await db.select({ receipt: receipts, user: users }).from(receipts).leftJoin(users, eq(receipts.userId, users.id)).where(and(eq(receipts.id, id), eq(receipts.visibility, "PUBLIC"))).limit(1);
-  return result[0];
+  const result = await db.select({ receipt: receipts, user: users }).from(receipts).leftJoin(users, eq(receipts.userId, users.id)).where(publicReceiptWhere(eq(receipts.id, id))).limit(1);
+  const row = result[0];
+  return row && { receipt: row.receipt, user: toPublicUser(row.user) };
 }
 
 export async function getRecentPublicReceipts(limit = 6) {
   const db = await getDb();
   if (!db) return [];
-  return db.select({ receipt: receipts, user: users }).from(receipts).leftJoin(users, eq(receipts.userId, users.id)).where(eq(receipts.visibility, "PUBLIC")).orderBy(desc(receipts.createdAt)).limit(limit);
+  const rows = await db.select({ receipt: receipts, user: users }).from(receipts).leftJoin(users, eq(receipts.userId, users.id)).where(publicReceiptWhere()).orderBy(desc(receipts.createdAt)).limit(limit);
+  return rows.map((row) => ({ receipt: row.receipt, user: toPublicUser(row.user) }));
 }
 
 /**
@@ -132,7 +166,7 @@ export async function getPublicFeed(options: { cursor?: number; category?: strin
   const limit = Math.min(Math.max(options.limit ?? 12, 1), 50);
   const db = await getDb();
   if (!db) return { items: [], nextCursor: null as number | null };
-  const filters = [eq(receipts.visibility, "PUBLIC")];
+  const filters: Array<SQL | undefined> = [];
   if (options.category) filters.push(eq(receipts.category, options.category));
   if (options.cursor) filters.push(lt(receipts.id, options.cursor));
   // One extra row tells us whether another page exists without a count query.
@@ -140,7 +174,7 @@ export async function getPublicFeed(options: { cursor?: number; category?: strin
     .select({ receipt: receipts, user: users })
     .from(receipts)
     .leftJoin(users, eq(receipts.userId, users.id))
-    .where(and(...filters))
+    .where(publicReceiptWhere(...filters))
     .orderBy(desc(receipts.id))
     .limit(limit + 1);
   return buildFeedPage(rows, limit);
@@ -188,7 +222,7 @@ export async function listPublicReceiptsForUser(userId: number, limit = 12) {
   return db
     .select()
     .from(receipts)
-    .where(and(eq(receipts.userId, userId), eq(receipts.visibility, "PUBLIC")))
+    .where(publicReceiptWhere(eq(receipts.userId, userId)))
     .orderBy(desc(receipts.id))
     .limit(limit);
 }
@@ -478,7 +512,7 @@ export async function getDerivedCount(receiptId: number) {
   const rows = await db
     .select({ total: count() })
     .from(receipts)
-    .where(and(eq(receipts.derivedFromId, receiptId), eq(receipts.visibility, "PUBLIC")));
+    .where(publicReceiptWhere(eq(receipts.derivedFromId, receiptId)));
   return Number(rows[0]?.total ?? 0);
 }
 
@@ -503,8 +537,7 @@ export async function getResolvingSoon(options: { limit?: number; now?: Date } =
     .from(receipts)
     .leftJoin(users, eq(receipts.userId, users.id))
     .where(
-      and(
-        eq(receipts.visibility, "PUBLIC"),
+      publicReceiptWhere(
         inArray(receipts.status, ["PENDING", "LOCKED"]),
         gte(receipts.resolutionDate, now),
       ),
@@ -605,4 +638,184 @@ export async function recordAchievement(userId: number, achievementType: string)
   if (!db) return;
   const existing = await db.select().from(achievements).where(and(eq(achievements.userId, userId), eq(achievements.achievementType, achievementType))).limit(1);
   if (!existing.length) await db.insert(achievements).values({ userId, achievementType });
+}
+
+// ---------------------------------------------------------------------------
+// Moderation
+// ---------------------------------------------------------------------------
+
+/**
+ * How many Receipts this person has reported since midnight.
+ *
+ * The unique index already stops the same Receipt being reported twice by the
+ * same person; this is the other shape of abuse — one person filing against
+ * many Receipts to bury someone.
+ */
+export async function countReportsToday(reporterId: number) {
+  const db = await getDb();
+  if (!db) return 0;
+  const rows = await db
+    .select({ value: count() })
+    .from(receiptReports)
+    .where(and(eq(receiptReports.reporterId, reporterId), gte(receiptReports.createdAt, startOfDay(new Date()))));
+  return Number(rows[0]?.value ?? 0);
+}
+
+export async function getReportByReporter(receiptId: number, reporterId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db
+    .select()
+    .from(receiptReports)
+    .where(and(eq(receiptReports.receiptId, receiptId), eq(receiptReports.reporterId, reporterId)))
+    .limit(1);
+  return rows[0];
+}
+
+/**
+ * Files a report, or reports that one already exists.
+ *
+ * Reporting the same Receipt again is the same report, not a second one — the
+ * unique index enforces it and this returns `created: false` rather than an
+ * error, so a double tap reads as "thanks, already logged" instead of a
+ * failure the reporter has to interpret.
+ */
+export async function createReceiptReport(input: {
+  receiptId: number;
+  reporterId: number;
+  reason: ReportReason;
+  detail?: string | null;
+}): Promise<{ created: boolean; rateLimited: boolean }> {
+  const db = await getDb();
+  if (!db) return { created: false, rateLimited: false };
+  if (await getReportByReporter(input.receiptId, input.reporterId)) {
+    return { created: false, rateLimited: false };
+  }
+  if ((await countReportsToday(input.reporterId)) >= MAX_REPORTS_PER_DAY) {
+    return { created: false, rateLimited: true };
+  }
+  await db.insert(receiptReports).values({
+    receiptId: input.receiptId,
+    reporterId: input.reporterId,
+    reason: input.reason,
+    detail: input.detail ?? null,
+  });
+  return { created: true, rateLimited: false };
+}
+
+/** Open reports against one Receipt. Drives the "already flagged" count. */
+export async function countOpenReports(receiptId: number) {
+  const db = await getDb();
+  if (!db) return 0;
+  const rows = await db
+    .select({ value: count() })
+    .from(receiptReports)
+    .where(and(eq(receiptReports.receiptId, receiptId), eq(receiptReports.status, "OPEN")));
+  return Number(rows[0]?.value ?? 0);
+}
+
+/**
+ * The moderation queue: reports with the Receipt they are about and the
+ * reporter, newest first, keyset-paginated like the public feed.
+ *
+ * Deliberately not filtered by the Receipt's visibility — a private Receipt
+ * can still be reported by someone who saw it while it was public, and a
+ * hidden one still needs its history readable.
+ */
+export async function getReportQueue(options: { status?: ReportStatus; cursor?: number; limit?: number } = {}) {
+  const limit = Math.min(Math.max(options.limit ?? 25, 1), 100);
+  const db = await getDb();
+  if (!db) return { items: [], nextCursor: null as number | null };
+  const filters = [] as Array<SQL | undefined>;
+  if (options.status) filters.push(eq(receiptReports.status, options.status));
+  if (options.cursor) filters.push(lt(receiptReports.id, options.cursor));
+  const rows = await db
+    .select({ report: receiptReports, receipt: receipts, reporter: users })
+    .from(receiptReports)
+    .leftJoin(receipts, eq(receiptReports.receiptId, receipts.id))
+    .leftJoin(users, eq(receiptReports.reporterId, users.id))
+    .where(filters.length ? and(...filters) : undefined)
+    .orderBy(desc(receiptReports.id))
+    .limit(limit + 1);
+  return buildReportPage(rows, limit);
+}
+
+/**
+ * Turns an over-fetched report row set into a page.
+ *
+ * Same contract as buildFeedPage, and pure for the same reason. The reporter
+ * is redacted through toPublicUser: a moderator needs to recognise a repeat
+ * reporter, not to read their email address.
+ */
+export function buildReportPage<Report extends { id: number }, Receipt>(
+  rows: Array<{ report: Report; receipt?: Receipt | null; reporter?: Parameters<typeof toPublicUser>[0] }>,
+  limit: number,
+) {
+  const items = rows.slice(0, limit);
+  return {
+    items: items.map((row) => ({
+      report: row.report,
+      receipt: row.receipt ?? null,
+      reporter: toPublicUser(row.reporter),
+    })),
+    nextCursor: rows.length > limit ? (items[items.length - 1]?.report.id ?? null) : null,
+  };
+}
+
+/** The decisions taken against one Receipt, newest first. */
+export async function listModerationActions(receiptId: number, limit = 25) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(moderationActions)
+    .where(eq(moderationActions.receiptId, receiptId))
+    .orderBy(desc(moderationActions.id))
+    .limit(limit);
+}
+
+/**
+ * Applies a moderator's decision: sets the Receipt's moderation status where
+ * the action changes it, closes the Receipt's open reports, and appends one
+ * audit row.
+ *
+ * Nothing here deletes or edits the Receipt. HIDE takes it off public
+ * surfaces; the row, its interactions, and its lineage all stay exactly as
+ * they were, which is what lets RESTORE be a genuine undo.
+ */
+export async function applyModerationAction(input: {
+  receiptId: number;
+  moderatorId: number;
+  action: ModerationAction;
+  note?: string | null;
+}) {
+  const db = await getDb();
+  if (!db) return null;
+  const receipt = await getReceiptById(input.receiptId);
+  if (!receipt) return null;
+
+  const nextStatus = statusAfter(input.action);
+  const resultingStatus = nextStatus ?? receipt.moderationStatus;
+  if (nextStatus && nextStatus !== receipt.moderationStatus) {
+    await db.update(receipts).set({ moderationStatus: nextStatus }).where(eq(receipts.id, input.receiptId));
+  }
+
+  const reportsClosed = await countOpenReports(input.receiptId);
+  if (reportsClosed) {
+    await db
+      .update(receiptReports)
+      .set({ status: reportStatusAfter(input.action), resolvedAt: new Date(), resolvedBy: input.moderatorId })
+      .where(and(eq(receiptReports.receiptId, input.receiptId), eq(receiptReports.status, "OPEN")));
+  }
+
+  await db.insert(moderationActions).values({
+    receiptId: input.receiptId,
+    moderatorId: input.moderatorId,
+    action: input.action,
+    resultingStatus,
+    note: input.note ?? null,
+    reportsClosed,
+  });
+
+  return { receiptId: input.receiptId, moderationStatus: resultingStatus, reportsClosed };
 }

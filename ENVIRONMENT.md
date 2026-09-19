@@ -14,5 +14,6 @@ The deployment needs the following environment variables. Provide real values th
 | `BUILT_IN_FORGE_API_KEY` | Optional server-side Manus built-in API credential |
 | `VITE_ANALYTICS_ENDPOINT` | Optional analytics script endpoint |
 | `VITE_ANALYTICS_WEBSITE_ID` | Optional analytics site identifier |
+| `VITE_ABUSE_CONTACT` | Abuse and legal contact address, shown in the footer and on the report form. Unset hides it. |
 
 This repository contains no secret values. Supply them through your host's secret manager or a local `.env` file, which is gitignored.

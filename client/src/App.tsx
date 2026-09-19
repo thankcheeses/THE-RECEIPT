@@ -1,8 +1,8 @@
-import { startLogin } from "@/const";
+import { ABUSE_CONTACT, startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 import { DEMO_RECEIPTS, CATEGORIES, type Category } from "@shared/seed";
-import { Activity, ArrowRight, BarChart3, Bell, Heart, Check, ChevronRight, Clock3, Copy, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, Sparkles, Target, Trophy, UserRound, X, Zap } from "lucide-react";
+import { Activity, ArrowRight, BarChart3, Bell, Heart, Check, ChevronRight, Clock3, Copy, EyeOff, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, ShieldAlert, Sparkles, Target, Trophy, UserRound, X, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, Route, Router as WouterRouter, Switch, useLocation, useRoute } from "wouter";
 import { Toaster } from "@/components/ui/sonner";
@@ -13,6 +13,7 @@ import { INTERACTION_COPY, SEMANTIC_TYPES, SEMANTIC_TYPE_COPY, defaultSemanticTy
 import { SHARE_TARGETS } from "@/lib/sharing/adapters";
 import { availableTargets, groupedTargets, runShare, type ShareContext } from "@/lib/sharing/core";
 import { type CardFormat } from "@shared/cardFormats";
+import { MAX_REPORT_DETAIL, MODERATION_ACTION_COPY, MODERATION_ACTIONS, REPORT_REASONS, REPORT_REASON_COPY, resolveModerationStatus, type ModerationAction, type ReportReason, type ReportStatus } from "@shared/moderation";
 import { IS_STATIC_DEMO } from "@/lib/staticDemo";
 
 const dateLabel = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
@@ -74,7 +75,7 @@ function Header() {
 }
 
 function Page({ children, eyebrow, title, description, actions }: { children: React.ReactNode; eyebrow?: string; title?: string; description?: string; actions?: React.ReactNode }) {
-  return <><Header /><main className="page-shell">{title && <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{actions && <div className="heading-actions">{actions}</div>}</div>}{children}</main><footer className="site-footer"><span>PUT IT ON THE RECORD.</span><span>NO EDITS. NO EXCUSES.</span></footer></>;
+  return <><Header /><main className="page-shell">{title && <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{actions && <div className="heading-actions">{actions}</div>}</div>}{children}</main><footer className="site-footer"><span>PUT IT ON THE RECORD.</span><span>NO EDITS. NO EXCUSES.</span>{ABUSE_CONTACT && <a className="footer-contact" href={`mailto:${ABUSE_CONTACT}`}>REPORT ABUSE</a>}</footer></>;
 }
 
 function ButtonLink({ href, children, variant = "primary", className = "" }: { href: string; children: React.ReactNode; variant?: "primary" | "secondary" | "ghost"; className?: string }) {
@@ -248,6 +249,87 @@ function ReceiptActions({ receipt }: { receipt: any }) {
 }
 
 /**
+ * Reporting a public receipt.
+ *
+ * Deliberately quiet: a text link, not a button competing with the share
+ * sheet. It is not offered on your own receipt, because reporting it would do
+ * nothing — a receipt cannot be deleted, by its author or by anyone else.
+ *
+ * Signed-out visitors get the published abuse contact instead of a form. One
+ * report per person per receipt is what keeps the queue meaningful, and that
+ * needs an account to key on.
+ */
+function ReportControl({ receipt }: { receipt: any }) {
+  const { isAuthenticated, user, loading } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState<ReportReason>("HARASSMENT");
+  const [detail, setDetail] = useState("");
+  const receiptId = Number(receipt.id);
+  const isMine = Boolean(user && receipt.userId === (user as any).id);
+  const mine = trpc.moderation.myReport.useQuery(
+    { receiptId },
+    { enabled: isAuthenticated && !isMine && Number.isFinite(receiptId), retry: false },
+  );
+  const report = trpc.moderation.report.useMutation({
+    onSuccess: (result) => {
+      setOpen(false);
+      setDetail("");
+      mine.refetch();
+      toast.success(result.alreadyReported ? "You already reported this. It is in the queue." : "Reported. A moderator will look at it.");
+    },
+    onError: (error) => toast.error(error.message),
+  });
+
+  // Nothing until we know who is looking: offering "report" on your own
+  // receipt for a frame, then erroring on the click, is worse than a beat of
+  // nothing.
+  if (loading || isMine) return null;
+
+  if (!isAuthenticated) {
+    return <p className="report-line">
+      Something wrong with this receipt? <button className="text-link inline" onClick={() => startLogin()}>Sign in to report it</button>
+      {ABUSE_CONTACT && <> or write to <a href={`mailto:${ABUSE_CONTACT}`}>{ABUSE_CONTACT}</a></>}.
+    </p>;
+  }
+
+  if (mine.data?.reported) {
+    return <p className="report-line muted">You reported this receipt. A moderator will review it.</p>;
+  }
+
+  return <div className="report-control">
+    {!open
+      ? <button className="text-link" onClick={() => setOpen(true)}>Report this receipt</button>
+      : <div className="report-form">
+        <span className="eyebrow">WHAT IS WRONG WITH IT?</span>
+        <div className="report-reasons">
+          {REPORT_REASONS.map((value) => <button
+            key={value}
+            className={`report-reason ${reason === value ? "active" : ""}`}
+            onClick={() => setReason(value)}
+            title={REPORT_REASON_COPY[value].blurb}
+          >{REPORT_REASON_COPY[value].label}</button>)}
+        </div>
+        <p className="muted">{REPORT_REASON_COPY[reason].blurb}</p>
+        <textarea
+          value={detail}
+          maxLength={MAX_REPORT_DETAIL}
+          onChange={(event) => setDetail(event.target.value)}
+          placeholder={reason === "OTHER" ? "Tell us what is wrong. Required for “something else”." : "Anything else a moderator should know (optional)."}
+        />
+        <div className="report-actions">
+          <button
+            className="button button-dark"
+            disabled={report.isPending || (reason === "OTHER" && detail.trim().length < 4)}
+            onClick={() => report.mutate({ receiptId, reason, detail: detail.trim() || undefined })}
+          >SEND REPORT</button>
+          <button className="button button-secondary" onClick={() => setOpen(false)}>CANCEL</button>
+        </div>
+        <p className="muted small">Reporting does not delete the receipt — nothing here can. A moderator can take it off public surfaces.</p>
+      </div>}
+  </div>;
+}
+
+/**
  * The share surface. Targets come from the sharing adapters, so this component
  * holds no platform URLs and gains new platforms without changing.
  */
@@ -323,7 +405,9 @@ function ReceiptDetail() {
   }, [id, receipt]);
   const onShared = (method: string) =>
     track.mutate({ event: "receipt_shared", properties: { receiptId: id, method, surface: isPublic ? "public" : "owner" } });
-  return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><ReceiptActions receipt={receipt} /><ShareSheet context={shareContext} onShared={onShared} />{!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && !isDue && <div className="resolve-box pending-box"><div><span className="eyebrow">NOT DUE YET</span><h3>Reality is still working on it.</h3><p className="muted">This receipt resolves {dateLabel(receipt.resolutionDate)}. You can record the result then — not before.</p></div><div className="pending-clock"><Clock3 size={26} /></div></div>}
+  return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><ReceiptActions receipt={receipt} /><ShareSheet context={shareContext} onShared={onShared} />{isPublic && <ReportControl receipt={receipt} />}
+      {!isPublic && resolveModerationStatus((receipt as any).moderationStatus) === "HIDDEN" && <div className="resolve-box moderation-box"><div><span className="eyebrow">REMOVED FROM PUBLIC VIEW</span><h3>A moderator took this off the public surfaces.</h3><p className="muted">The receipt itself is untouched — it is still locked, still yours, and still resolvable. It no longer appears in the feed, on your public profile, or at its public link.{ABUSE_CONTACT ? <> If you think that was wrong, write to <a href={`mailto:${ABUSE_CONTACT}`}>{ABUSE_CONTACT}</a>.</> : null}</p></div><div className="pending-clock"><ShieldAlert size={26} /></div></div>}
+      {!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && !isDue && <div className="resolve-box pending-box"><div><span className="eyebrow">NOT DUE YET</span><h3>Reality is still working on it.</h3><p className="muted">This receipt resolves {dateLabel(receipt.resolutionDate)}. You can record the result then — not before.</p></div><div className="pending-clock"><Clock3 size={26} /></div></div>}
       {!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && isDue && <div className="resolve-box"><div><span className="eyebrow">TIME TO FACE THE MUSIC?</span><h3>How did it go?</h3></div><div className="resolve-actions"><button onClick={() => resolveMutation.mutate({ id, result: "RIGHT" })} className="result-button right">RIGHT</button><button onClick={() => resolveMutation.mutate({ id, result: "PARTIALLY RIGHT" })} className="result-button partial">PARTIAL</button><button onClick={() => resolveMutation.mutate({ id, result: "WRONG" })} className="result-button wrong">WRONG</button><button onClick={() => resolveMutation.mutate({ id, result: "TOO EARLY" })} className="result-button early">TOO EARLY</button></div></div>}</div><aside className="detail-aside"><div className="share-hook"><Sparkles size={20} /><span className="eyebrow">YOUR TURN</span><h3>What do <em>you</em> think will happen?</h3><ButtonLink href="/create">MAKE YOUR RECEIPT</ButtonLink></div><div className="detail-meta"><span>RECEIPT DETAILS</span><dl><dt>CREATOR</dt><dd>{user?.username || user?.name || "You"}</dd><dt>STATUS</dt><dd className={statusClass(receipt.status)}>{receipt.status}</dd><dt>CONFIDENCE</dt><dd>{receipt.confidence}%</dd><dt>RESOLVES</dt><dd>{dateLabel(receipt.resolutionDate)}</dd></dl></div></aside></> : <div className="empty-state"><ReceiptText size={34} /><h3>That receipt is missing.</h3><p>It may be private, or the number may have been typed with too much confidence.</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}</div></Page>;
 }
 
@@ -519,11 +603,80 @@ function Analytics() {
   </Page>;
 }
 
+/**
+ * Admin-only moderation queue.
+ *
+ * The only destructive-looking action here is HIDE, and it is not destructive:
+ * it takes a receipt off public surfaces and leaves the row intact, so RESTORE
+ * is a real undo. Every decision — including leaving something up — appends an
+ * audit row server-side.
+ */
+function Moderation() {
+  const { isAuthenticated } = useAuth();
+  const utils = trpc.useUtils();
+  const [status, setStatus] = useState<ReportStatus>("OPEN");
+  const [notes, setNotes] = useState<Record<number, string>>({});
+  const { data, isLoading, error } = trpc.moderation.queue.useQuery({ status }, { enabled: isAuthenticated, retry: false });
+  const act = trpc.moderation.act.useMutation({
+    onSuccess: (result) => {
+      toast.success(result.moderationStatus === "HIDDEN" ? "Hidden from public surfaces." : "Left visible.");
+      utils.moderation.queue.invalidate();
+    },
+    onError: (mutationError) => toast.error(mutationError.message),
+  });
+
+  if (!isAuthenticated) return <Page eyebrow="INTERNAL" title="Moderation"><AuthPrompt title="Sign in to continue." description="This page is only available to administrators." /></Page>;
+  if (error) return <Page eyebrow="INTERNAL" title="Moderation"><div className="empty-state"><LockKeyhole size={30} /><h3>Not your page.</h3><p>Moderation is restricted to administrators.</p><ButtonLink href="/">BACK HOME</ButtonLink></div></Page>;
+  if (isLoading || !data) return <Page eyebrow="INTERNAL" title="Moderation"><div className="loading-state">Loading the queue…</div></Page>;
+
+  return <Page eyebrow="INTERNAL · ADMIN ONLY" title="Moderation" description="Reported receipts. Hiding removes a receipt from public surfaces; it never edits or deletes one.">
+    <div className="tabs-row">{(["OPEN", "ACTIONED", "DISMISSED"] as ReportStatus[]).map((item) => <button key={item} className={status === item ? "active" : ""} onClick={() => setStatus(item)}>{item}</button>)}</div>
+    {data.items.length ? <div className="moderation-list">
+      {data.items.map(({ report, receipt, reporter }) => <div className="moderation-item" key={report.id}>
+        <div className="moderation-head">
+          <span className="eyebrow">REPORT #{String(report.id).padStart(5, "0")}</span>
+          <Tag dark>{REPORT_REASON_COPY[report.reason as ReportReason]?.label ?? report.reason}</Tag>
+          <span className="muted">{dateLabel(report.createdAt)}</span>
+          {receipt && resolveModerationStatus((receipt as any).moderationStatus) === "HIDDEN" && <span className="moderation-hidden"><EyeOff size={13} /> HIDDEN</span>}
+        </div>
+        {report.detail && <p className="moderation-detail">“{report.detail}”</p>}
+        <p className="muted small">Reported by {reporter?.username ? `@${reporter.username}` : reporter?.name || "a caller"}.</p>
+        {receipt
+          ? <div className="moderation-receipt">
+            <Link href={`/r/${(receipt as any).id}`}>Receipt #{String((receipt as any).id).padStart(6, "0")}</Link>
+            <strong>“{(receipt as any).prediction}”</strong>
+            <span className="muted">{(receipt as any).category} · {(receipt as any).confidence}% · {(receipt as any).visibility}</span>
+          </div>
+          : <p className="muted">The receipt this report points at is gone.</p>}
+        {report.status === "OPEN" && receipt && <>
+          <input
+            className="moderation-note"
+            value={notes[report.id] ?? ""}
+            maxLength={MAX_REPORT_DETAIL}
+            placeholder="Why (recorded in the audit trail, optional)"
+            onChange={(event) => setNotes((current) => ({ ...current, [report.id]: event.target.value }))}
+          />
+          <div className="moderation-actions">
+            {MODERATION_ACTIONS.map((action) => <button
+              key={action}
+              className={`button ${action === "HIDE" ? "button-dark" : "button-secondary"}`}
+              disabled={act.isPending}
+              title={MODERATION_ACTION_COPY[action as ModerationAction].blurb}
+              onClick={() => act.mutate({ receiptId: (receipt as any).id, action, note: (notes[report.id] ?? "").trim() || undefined })}
+            >{MODERATION_ACTION_COPY[action as ModerationAction].label.toUpperCase()}</button>)}
+          </div>
+        </>}
+        {report.status !== "OPEN" && <p className="muted small">Closed {dateLabel(report.resolvedAt)}.</p>}
+      </div>)}
+    </div> : <div className="empty-state compact"><ShieldAlert size={28} /><h3>Nothing in this queue.</h3><p>No reports are waiting on a decision.</p></div>}
+  </Page>;
+}
+
 function AuthPrompt({ title, description }: { title: string; description: string }) { return <div className="auth-prompt"><LockKeyhole size={24} /><h3>{title}</h3><p>{description}</p><button className="button button-dark" onClick={() => startLogin()}>SIGN IN TO CONTINUE <ArrowRight size={16} /></button></div>; }
 
 function NotFound() { return <Page title="404"><div className="empty-state"><ReceiptText size={34} /><h3>This page is off the record.</h3><ButtonLink href="/">BACK HOME</ButtonLink></div></Page>; }
 
-function Router() { return <Switch><Route path="/" component={Home} /><Route path="/daily" component={Daily} /><Route path="/create" component={Create} /><Route path="/receipts" component={MyReceipts} /><Route path="/receipt/:id" component={ReceiptDetail} /><Route path="/r/:id" component={ReceiptDetail} /><Route path="/challenges" component={Challenges} /><Route path="/challenge/:id" component={ChallengeDetail} /><Route path="/feed" component={Feed} /><Route path="/u/:username" component={PublicProfile} /><Route path="/leaderboard" component={Leaderboard} /><Route path="/analytics" component={Analytics} /><Route path="/profile" component={Profile} /><Route component={NotFound} /></Switch>; }
+function Router() { return <Switch><Route path="/" component={Home} /><Route path="/daily" component={Daily} /><Route path="/create" component={Create} /><Route path="/receipts" component={MyReceipts} /><Route path="/receipt/:id" component={ReceiptDetail} /><Route path="/r/:id" component={ReceiptDetail} /><Route path="/challenges" component={Challenges} /><Route path="/challenge/:id" component={ChallengeDetail} /><Route path="/feed" component={Feed} /><Route path="/u/:username" component={PublicProfile} /><Route path="/leaderboard" component={Leaderboard} /><Route path="/analytics" component={Analytics} /><Route path="/moderation" component={Moderation} /><Route path="/profile" component={Profile} /><Route component={NotFound} /></Switch>; }
 
 // GitHub Pages serves the app from /THE-RECEIPT/, so every route is prefixed
 // with Vite's base path. It is "/" for the normal server build.

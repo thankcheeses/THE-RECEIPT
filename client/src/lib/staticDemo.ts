@@ -11,6 +11,16 @@
  */
 import { CATEGORIES, DAILY_PROMPTS, getTodayPrompt, type Category, type ReceiptStatus } from "@shared/seed";
 import { allowsInteraction, defaultSemanticTypeFor, resolveSemanticType, type InteractionType, type SemanticType } from "@shared/interactionPolicy";
+import {
+  MAX_REPORTS_PER_DAY,
+  isPubliclyVisible,
+  reportStatusAfter,
+  statusAfter,
+  type ModerationAction,
+  type ModerationStatus,
+  type ReportReason,
+  type ReportStatus,
+} from "@shared/moderation";
 
 export const IS_STATIC_DEMO = import.meta.env.VITE_STATIC_DEMO === "true";
 
@@ -52,6 +62,30 @@ type DemoReceipt = {
   resolvedAt: Date | null;
   semanticType: SemanticType | null;
   derivedFromId: number | null;
+  moderationStatus: ModerationStatus;
+};
+
+type DemoReport = {
+  id: number;
+  receiptId: number;
+  reporterId: number;
+  reason: ReportReason;
+  detail: string | null;
+  status: ReportStatus;
+  createdAt: Date;
+  resolvedAt: Date | null;
+  resolvedBy: number | null;
+};
+
+type DemoModerationAction = {
+  id: number;
+  receiptId: number;
+  moderatorId: number;
+  action: ModerationAction;
+  resultingStatus: ModerationStatus;
+  note: string | null;
+  reportsClosed: number;
+  createdAt: Date;
 };
 
 type DemoChallenge = {
@@ -95,9 +129,13 @@ type DemoState = {
   events: Array<{ event: string; properties: unknown; at: Date }>;
   /** One response per receipt in this browser, keyed by receipt id. */
   interactions: Record<string, InteractionType>;
+  reports: DemoReport[];
+  moderationActions: DemoModerationAction[];
   nextReceiptId: number;
   nextChallengeId: number;
   nextNotificationId: number;
+  nextReportId: number;
+  nextModerationActionId: number;
 };
 
 const RESOLVED_STATUSES: ReceiptStatus[] = ["RIGHT", "WRONG", "PARTIALLY RIGHT"];
@@ -110,9 +148,13 @@ const emptyState = (): DemoState => ({
   dailyActivity: [],
   events: [],
   interactions: {},
+  reports: [],
+  moderationActions: [],
   nextReceiptId: 4822,
   nextChallengeId: 1,
   nextNotificationId: 1,
+  nextReportId: 1,
+  nextModerationActionId: 1,
 });
 
 /** JSON has no Date type, so ISO strings are revived on read. */
@@ -274,6 +316,13 @@ const requireUser = (state: DemoState): DemoUser => {
   return state.user;
 };
 
+/** Mirrors adminProcedure. The demo account is not an admin, by design. */
+const requireAdmin = (state: DemoState): DemoUser => {
+  const user = requireUser(state);
+  if (user.role !== "admin") throw new Error("You do not have required permission (10002)");
+  return user;
+};
+
 const forUser = (state: DemoState, userId: number) =>
   state.receipts.filter((receipt) => receipt.userId === userId).sort((a, b) => b.id - a.id);
 
@@ -370,6 +419,7 @@ const handlers: Record<string, Handler> = {
         resolvedAt: null,
         semanticType: "PREDICTION",
         derivedFromId: null,
+        moderationStatus: "VISIBLE",
       };
       state.receipts.push(receipt);
       const today = startOfDay(new Date());
@@ -390,22 +440,24 @@ const handlers: Record<string, Handler> = {
   "receipts.recentPublic": () => {
     const state = readState();
     return state.receipts
-      .filter((receipt) => receipt.visibility === "PUBLIC")
+      .filter(isPubliclyVisible)
       .sort((a, b) => b.id - a.id)
       .slice(0, 12)
-      .map((receipt) => ({ receipt, user: state.user }));
+      .map((receipt) => ({ receipt, user: publicUser(state.user) }));
   },
   "receipts.publicById": (input: { id: number }) => {
     const state = readState();
-    const receipt = state.receipts.find((item) => item.id === input.id && item.visibility === "PUBLIC");
+    const receipt = state.receipts.find((item) => item.id === input.id && isPubliclyVisible(item));
     if (!receipt) throw new Error("That receipt is private or no longer exists.");
-    return { receipt, user: state.user };
+    // Redacted exactly as the server does, so the demo cannot show a field the
+    // real build withholds.
+    return { receipt, user: publicUser(state.user) };
   },
   "receipts.feed": (input?: { cursor?: number; category?: string; limit?: number }) => {
     const state = readState();
     const limit = Math.min(Math.max(input?.limit ?? 12, 1), 50);
     const all = state.receipts
-      .filter((receipt) => receipt.visibility === "PUBLIC")
+      .filter(isPubliclyVisible)
       .filter((receipt) => (input?.category ? receipt.category === input.category : true))
       .filter((receipt) => (input?.cursor ? receipt.id < input.cursor : true))
       .sort((a, b) => b.id - a.id);
@@ -420,7 +472,7 @@ const handlers: Record<string, Handler> = {
     const limit = Math.min(Math.max(input?.limit ?? 12, 1), 50);
     const now = Date.now();
     return state.receipts
-      .filter((receipt) => receipt.visibility === "PUBLIC" && ["PENDING", "LOCKED"].includes(receipt.status))
+      .filter((receipt) => isPubliclyVisible(receipt) && ["PENDING", "LOCKED"].includes(receipt.status))
       .filter((receipt) => new Date(receipt.resolutionDate).getTime() >= now)
       .sort((a, b) => new Date(a.resolutionDate).getTime() - new Date(b.resolutionDate).getTime())
       .slice(0, limit)
@@ -428,7 +480,7 @@ const handlers: Record<string, Handler> = {
   },
   "receipts.interactions": (input: { id: number }) => {
     const state = readState();
-    const receipt = state.receipts.find((item) => item.id === input.id && item.visibility === "PUBLIC");
+    const receipt = state.receipts.find((item) => item.id === input.id && isPubliclyVisible(item));
     if (!receipt) throw new Error("That receipt is private or no longer exists.");
     const mine = state.interactions[String(input.id)] ?? null;
     return {
@@ -436,13 +488,13 @@ const handlers: Record<string, Handler> = {
       // person's own response. Reported as such rather than invented.
       counts: mine ? { [mine]: 1 } : {},
       mine,
-      derivedCount: state.receipts.filter((item) => item.derivedFromId === input.id && item.visibility === "PUBLIC").length,
+      derivedCount: state.receipts.filter((item) => item.derivedFromId === input.id && isPubliclyVisible(item)).length,
     };
   },
   "receipts.interact": (input: { id: number; type: InteractionType | null }) =>
     mutate((state) => {
       requireUser(state);
-      const receipt = state.receipts.find((item) => item.id === input.id && item.visibility === "PUBLIC");
+      const receipt = state.receipts.find((item) => item.id === input.id && isPubliclyVisible(item));
       if (!receipt) throw new Error("That receipt is private or no longer exists.");
       if (input.type === null) {
         delete state.interactions[String(input.id)];
@@ -495,9 +547,10 @@ const handlers: Record<string, Handler> = {
         resolvedAt: null,
         semanticType: input.semanticType ?? defaultSemanticTypeFor(input.category),
         // Only a public parent can be linked, matching the server.
-        derivedFromId: input.derivedFromId && state.receipts.some((item) => item.id === input.derivedFromId && item.visibility === "PUBLIC")
+        derivedFromId: input.derivedFromId && state.receipts.some((item) => item.id === input.derivedFromId && isPubliclyVisible(item))
           ? input.derivedFromId
           : null,
+        moderationStatus: "VISIBLE",
       };
       state.receipts.push(receipt);
       if (input.challengeUsername) {
@@ -563,7 +616,7 @@ const handlers: Record<string, Handler> = {
       throw new Error("No caller with that username.");
     }
     const receipts = state.receipts
-      .filter((receipt) => receipt.userId === state.user!.id && receipt.visibility === "PUBLIC")
+      .filter((receipt) => receipt.userId === state.user!.id && isPubliclyVisible(receipt))
       .sort((a, b) => b.id - a.id);
     const resolved = receipts.filter((receipt) => RESOLVED_STATUSES.includes(receipt.status));
     const right = resolved.filter((receipt) => receipt.status === "RIGHT");
@@ -662,6 +715,105 @@ const handlers: Record<string, Handler> = {
         item.readAt = new Date();
       }
       return { success: true } as const;
+    }),
+
+  // Moderation. The demo has one account, which authors every receipt in the
+  // browser, so the report flow is never offered here for the same reason it
+  // is not on the server: you cannot report your own receipt. The handlers
+  // exist so the UI's calls resolve instead of failing as unknown procedures.
+  "moderation.report": (input: { receiptId: number; reason: ReportReason; detail?: string }) =>
+    mutate((state) => {
+      const user = requireUser(state);
+      const receipt = state.receipts.find((item) => item.id === input.receiptId && isPubliclyVisible(item));
+      if (!receipt) throw new Error("That receipt is private or no longer exists.");
+      if (receipt.userId === user.id) {
+        throw new Error("This is your own receipt. Reporting it would not remove it — receipts cannot be deleted.");
+      }
+      const existing = state.reports.find((item) => item.receiptId === input.receiptId && item.reporterId === user.id);
+      if (existing) return { received: true, alreadyReported: true } as const;
+      const today = startOfDay(new Date()).getTime();
+      const todayCount = state.reports.filter(
+        (item) => item.reporterId === user.id && startOfDay(new Date(item.createdAt)).getTime() === today,
+      ).length;
+      if (todayCount >= MAX_REPORTS_PER_DAY) {
+        throw new Error("You have reported a lot today. Try again tomorrow, or write to the abuse contact.");
+      }
+      state.reports.unshift({
+        id: state.nextReportId++,
+        receiptId: input.receiptId,
+        reporterId: user.id,
+        reason: input.reason,
+        detail: input.detail ?? null,
+        status: "OPEN",
+        createdAt: new Date(),
+        resolvedAt: null,
+        resolvedBy: null,
+      });
+      return { received: true, alreadyReported: false } as const;
+    }),
+
+  "moderation.myReport": (input: { receiptId: number }) => {
+    const state = readState();
+    const user = requireUser(state);
+    const existing = state.reports.find((item) => item.receiptId === input.receiptId && item.reporterId === user.id);
+    return { reported: Boolean(existing), reason: existing?.reason ?? null };
+  },
+
+  "moderation.queue": (input?: { status?: ReportStatus; cursor?: number; limit?: number }) => {
+    const state = readState();
+    requireAdmin(state);
+    const limit = Math.min(Math.max(input?.limit ?? 25, 1), 100);
+    const all = state.reports
+      .filter((report) => (input?.status ? report.status === input.status : true))
+      .filter((report) => (input?.cursor ? report.id < input.cursor : true))
+      .sort((a, b) => b.id - a.id);
+    const items = all.slice(0, limit);
+    return {
+      items: items.map((report) => ({
+        report,
+        receipt: state.receipts.find((item) => item.id === report.receiptId) ?? null,
+        reporter: publicUser(state.user),
+      })),
+      nextCursor: all.length > limit ? items[items.length - 1]?.id ?? null : null,
+    };
+  },
+
+  "moderation.history": (input: { receiptId: number }) => {
+    const state = readState();
+    requireAdmin(state);
+    const receipt = state.receipts.find((item) => item.id === input.receiptId);
+    if (!receipt) throw new Error("No receipt with that id.");
+    return {
+      receipt,
+      actions: state.moderationActions.filter((item) => item.receiptId === input.receiptId).sort((a, b) => b.id - a.id),
+      openReports: state.reports.filter((item) => item.receiptId === input.receiptId && item.status === "OPEN").length,
+    };
+  },
+
+  "moderation.act": (input: { receiptId: number; action: ModerationAction; note?: string }) =>
+    mutate((state) => {
+      const user = requireAdmin(state);
+      const receipt = state.receipts.find((item) => item.id === input.receiptId);
+      if (!receipt) throw new Error("No receipt with that id.");
+      const next = statusAfter(input.action);
+      if (next) receipt.moderationStatus = next;
+      const open = state.reports.filter((item) => item.receiptId === input.receiptId && item.status === "OPEN");
+      for (const report of open) {
+        report.status = reportStatusAfter(input.action);
+        report.resolvedAt = new Date();
+        report.resolvedBy = user.id;
+      }
+      state.moderationActions.unshift({
+        id: state.nextModerationActionId++,
+        receiptId: input.receiptId,
+        moderatorId: user.id,
+        action: input.action,
+        resultingStatus: receipt.moderationStatus,
+        note: input.note ?? null,
+        reportsClosed: open.length,
+        createdAt: new Date(),
+      });
+      return { receiptId: input.receiptId, moderationStatus: receipt.moderationStatus, reportsClosed: open.length };
     }),
 
   "analytics.summary": () => {

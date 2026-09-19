@@ -59,6 +59,11 @@ export const receipts = mysqlTable(
     // The Receipt this one was written after ("ME TOO"). The new Receipt is
     // independently authored and locked; this only records where it came from.
     derivedFromId: int("derivedFromId"),
+    // Whether this Receipt is shown on public surfaces. Moderation never edits
+    // or deletes a Receipt — the author cannot, and neither can an admin — so
+    // a takedown flips this and leaves the record itself untouched. See
+    // shared/moderation.ts.
+    moderationStatus: mysqlEnum("moderationStatus", ["VISIBLE", "HIDDEN"]).default("VISIBLE").notNull(),
   },
   // The public feed reads `visibility = PUBLIC` newest-first, optionally
   // narrowed by category. Without these it is a table scan per page.
@@ -98,6 +103,75 @@ export const receiptInteractions = mysqlTable(
     uniqueIndex("receiptInteractions_receipt_user").on(table.receiptId, table.userId),
     index("receiptInteractions_receipt_type").on(table.receiptId, table.type),
   ],
+);
+
+/**
+ * One person's report of one Receipt.
+ *
+ * Reporting requires an account: the unique index below is what makes "one
+ * report per person per Receipt" enforceable, and an anonymous report has no
+ * key to deduplicate on and nobody to hold to it. People without an account
+ * are pointed at the published abuse contact instead.
+ *
+ * Reports are never deleted. A dismissed report is a decision that was made,
+ * and the next moderator looking at a repeat reporter needs to see it.
+ */
+export const receiptReports = mysqlTable(
+  "receiptReports",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    receiptId: int("receiptId").notNull(),
+    reporterId: int("reporterId").notNull(),
+    reason: mysqlEnum("reason", [
+      "HARASSMENT",
+      "HATE",
+      "VIOLENCE",
+      "SEXUAL",
+      "SELF_HARM",
+      "PRIVACY",
+      "IMPERSONATION",
+      "SPAM",
+      "ILLEGAL",
+      "OTHER",
+    ]).notNull(),
+    detail: text("detail"),
+    status: mysqlEnum("status", ["OPEN", "ACTIONED", "DISMISSED"]).default("OPEN").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    resolvedAt: timestamp("resolvedAt"),
+    resolvedBy: int("resolvedBy"),
+  },
+  (table) => [
+    // Reporting twice is the same report, not two. Without this a single
+    // person could manufacture a queue of complaints against one Receipt.
+    uniqueIndex("receiptReports_receipt_reporter").on(table.receiptId, table.reporterId),
+    // The moderation queue reads open reports newest-first.
+    index("receiptReports_status_id").on(table.status, table.id),
+    index("receiptReports_receipt_id").on(table.receiptId, table.id),
+    // Rate limiting reads one reporter's recent rows.
+    index("receiptReports_reporter_created").on(table.reporterId, table.createdAt),
+  ],
+);
+
+/**
+ * The audit trail. Every moderator decision appends a row — including the
+ * decision to leave something up — and nothing here is ever updated or
+ * removed, so the history of a Receipt's treatment is reconstructable.
+ */
+export const moderationActions = mysqlTable(
+  "moderationActions",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    receiptId: int("receiptId").notNull(),
+    moderatorId: int("moderatorId").notNull(),
+    action: mysqlEnum("action", ["HIDE", "RESTORE", "DISMISS"]).notNull(),
+    /** The moderation status the Receipt was left in, for a readable history. */
+    resultingStatus: mysqlEnum("resultingStatus", ["VISIBLE", "HIDDEN"]).notNull(),
+    note: text("note"),
+    /** How many reports this decision closed. */
+    reportsClosed: int("reportsClosed").default(0).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (table) => [index("moderationActions_receipt_id").on(table.receiptId, table.id)],
 );
 
 export const challenges = mysqlTable("challenges", {
@@ -174,5 +248,7 @@ export type DailyChallenge = typeof dailyChallenges.$inferSelect;
 export type Challenge = typeof challenges.$inferSelect;
 export type ReceiptInteraction = typeof receiptInteractions.$inferSelect;
 export type Notification = typeof notifications.$inferSelect;
+export type ReceiptReport = typeof receiptReports.$inferSelect;
+export type ModerationActionRow = typeof moderationActions.$inferSelect;
 export type DailyActivity = typeof dailyActivity.$inferSelect;
 export type AnalyticsEvent = typeof analyticsEvents.$inferSelect;

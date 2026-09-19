@@ -26,6 +26,7 @@ There is no money, betting, or wagering in the product.
 - **Challenges** — name another user when creating a receipt; they can accept and lock their own opposing position.
 - **Notifications** — in-app bell with unread count for challenges received and accepted.
 - **Profiles** — accuracy, category breakdown, confidence calibration, biggest call, and biggest miss.
+- **Reporting and moderation** — signed-in people can report a public receipt; administrators can take one off public surfaces. A takedown hides, it never deletes.
 - **Analytics** — a small closed event vocabulary covering signup, receipt creation, sharing, and resolution.
 - **Sharing** — one interface with platform adapters: OS share sheet, copy link, and composer intents for X, Bluesky, WhatsApp, Reddit and Facebook.
 
@@ -44,6 +45,22 @@ Support and agreement are stored as distinct interaction types. "147 people supp
 
 Categories and kinds are independent: one category holds several kinds. A category only suggests a starting point, and the author's choice is what is stored.
 
+## Reporting and moderation
+
+A receipt cannot be edited or deleted — not by its author, and not by an administrator. Moderation therefore never rewrites the record; it changes whether the record is *shown*.
+
+- **Reporting** requires an account. One report per person per receipt is enforced by a unique index, which is what keeps the queue meaningful, and an anonymous report has no key to deduplicate on. Signed-out visitors are pointed at the published abuse contact (`VITE_ABUSE_CONTACT`) instead. You cannot report your own receipt, because taking it down is not something reporting can achieve.
+- **Takedown** sets the receipt's `moderationStatus` to `HIDDEN`. The row, its interactions and its ME TOO lineage are untouched, so restoring is a genuine undo. Its author still sees it, with a notice, and can still resolve it — moderation and resolution are separate.
+- **Public surfaces** all compose one condition, `publicReceiptWhere()` in `server/db.ts`: visible means the author made it public *and* moderation has not hidden it. The feed, Resolving Soon, public profiles, the public link, the Open Graph metadata, the generated cards and the ME TOO count therefore close together. The static demo applies the same rule through `isPubliclyVisible()` in `shared/moderation.ts`.
+- **Audit trail.** Every decision appends a row to `moderationActions`, including a dismissal, recording the moderator, the resulting status, an optional note, and how many reports it closed. Nothing in that table is ever updated or deleted.
+
+| Reason | Reason | Reason |
+| --- | --- | --- |
+| Harassment | Hate | Violence or threats |
+| Sexual content | Self-harm | Private information |
+| Impersonation | Spam or scam | Illegal content |
+| Something else | | |
+
 ## Routes
 
 | Route | Purpose |
@@ -59,6 +76,7 @@ Categories and kinds are independent: one category holds several kinds. A catego
 | `/challenges` | Authenticated challenge list |
 | `/challenge/:id` | Head-to-head challenge detail and acceptance |
 | `/leaderboard` | Leaderboard views (currently demo-seeded and labeled as such in the UI) |
+| `/moderation` | Admin-only report queue and takedown controls |
 | `/profile` | Authenticated profile and statistics |
 
 ## Tech stack

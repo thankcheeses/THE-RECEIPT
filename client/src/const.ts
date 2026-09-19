@@ -3,6 +3,17 @@ import { IS_STATIC_DEMO, startDemoLogin } from "@/lib/staticDemo";
 
 export { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 
+/**
+ * Where someone writes when the in-app report is not the right channel — a
+ * legal notice, an appeal against a takedown, or an abuse report from a person
+ * with no account.
+ *
+ * Deliberately not hardcoded. Publishing an address nobody reads is worse than
+ * publishing none, so it comes from the deployment and the UI stays silent
+ * when it is unset.
+ */
+export const ABUSE_CONTACT = (import.meta.env.VITE_ABUSE_CONTACT ?? "").trim();
+
 // Start the Manus OAuth login. Call this from an event handler or effect at the
 // moment you want to navigate, e.g. `onClick={() => startLogin()}`.
 //
