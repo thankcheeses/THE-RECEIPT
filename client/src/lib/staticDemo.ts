@@ -28,6 +28,7 @@ type DemoUser = {
   currentStreak: number;
   longestStreak: number;
   lastDailyDate: Date | null;
+  lastActiveDate: Date | null;
   accuracy: number;
   createdAt: Date;
   updatedAt: Date;
@@ -170,11 +171,14 @@ export const startDemoLogin = () => {
         currentStreak: 0,
         longestStreak: 0,
         lastDailyDate: null,
+        lastActiveDate: null,
         accuracy: 0,
         createdAt: now,
         updatedAt: now,
         lastSignedIn: now,
       };
+      // The server records this in upsertUser() on a genuine first sign-in.
+      state.events.push({ event: "signup", properties: { loginMethod: "demo" }, at: now });
     }
   });
   window.dispatchEvent(new Event(AUTH_CHANGE_EVENT));
@@ -207,6 +211,9 @@ const dailyChallenge = () => {
 };
 
 const DAY_MS = 86_400_000;
+
+/** Mirrors STREAK_MILESTONES in server/db.ts. */
+const STREAK_MILESTONES = [3, 7, 14, 30, 50, 100, 365];
 
 const startOfDay = (date: Date) => {
   const day = new Date(date);
@@ -287,7 +294,20 @@ const profileStats = (state: DemoState, userId: number) => {
 type Handler = (input: any) => unknown;
 
 const handlers: Record<string, Handler> = {
-  "auth.me": () => readState().user,
+  "auth.me": () =>
+    mutate((state) => {
+      if (!state.user) return null;
+      const today = startOfDay(new Date());
+      const last = state.user.lastActiveDate ? startOfDay(state.user.lastActiveDate) : null;
+      if (!last || last.getTime() !== today.getTime()) {
+        if (last) {
+          const days = Math.round((today.getTime() - last.getTime()) / DAY_MS);
+          state.events.push({ event: "user_returned", properties: { daysSinceLastActive: days }, at: new Date() });
+        }
+        state.user.lastActiveDate = today;
+      }
+      return state.user;
+    }),
   "auth.logout": () =>
     mutate((state) => {
       state.user = null;
@@ -340,6 +360,9 @@ const handlers: Record<string, Handler> = {
         state.dailyActivity.push(key);
       }
       state.events.push({ event: "daily_answered", properties: { answer: input.answer, confidence: input.confidence, streak: user.currentStreak }, at: new Date() });
+      if (STREAK_MILESTONES.includes(user.currentStreak)) {
+        state.events.push({ event: "streak_milestone", properties: { streak: user.currentStreak }, at: new Date() });
+      }
       return receipt;
     }),
 
@@ -433,6 +456,12 @@ const handlers: Record<string, Handler> = {
       const receipt = state.receipts.find((item) => item.id === input.id);
       if (!receipt || receipt.userId !== user.id) throw new Error("You can only resolve your own receipts.");
       if (!["PENDING", "LOCKED"].includes(receipt.status)) throw new Error("This receipt is already resolved.");
+      // Mirrors canResolveAt() in server/db.ts: a receipt cannot be judged
+      // before the date it declared.
+      if (Date.now() < new Date(receipt.resolutionDate).getTime()) {
+        const due = new Date(receipt.resolutionDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+        throw new Error(`This receipt resolves on ${due}. Come back then.`);
+      }
       receipt.status = input.result;
       receipt.result = input.note ?? null;
       receipt.resolvedAt = new Date();
@@ -519,6 +548,23 @@ const handlers: Record<string, Handler> = {
       }
       return { success: true } as const;
     }),
+
+  "analytics.summary": () => {
+    const state = readState();
+    const totals = new Map<string, number>();
+    for (const item of state.events) totals.set(item.event, (totals.get(item.event) ?? 0) + 1);
+    return {
+      events: Array.from(totals, ([event, total]) => ({ event, total })),
+      // A single-browser demo has one user, so retention is only ever that
+      // user's own activity. Reported honestly rather than invented.
+      retention: activityWindow(state, 14).map((day, index, all) => ({
+        date: day.date,
+        active: day.active ? 1 : 0,
+        returning: day.active && all[index - 1]?.active ? 1 : 0,
+        retention: day.active && all[index - 1]?.active ? 100 : 0,
+      })),
+    };
+  },
 
   "analytics.track": (input: { event: string; properties?: Record<string, unknown> }) =>
     mutate((state) => {

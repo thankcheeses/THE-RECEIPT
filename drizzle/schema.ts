@@ -15,6 +15,10 @@ export const users = mysqlTable("users", {
   // derived from the gap between this and today, so they survive restarts and
   // never need a backfill job.
   lastDailyDate: timestamp("lastDailyDate"),
+  // Midnight of the day this user was last active. `lastSignedIn` is refreshed
+  // on every authenticated request by the auth SDK, so it cannot distinguish a
+  // return visit from a page load; this can.
+  lastActiveDate: timestamp("lastActiveDate"),
   accuracy: int("accuracy").default(0).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

@@ -46,7 +46,13 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   // Checked before the upsert so `signup` fires once, on the real first
   // sign-in, rather than on every subsequent one. Tracking it here covers all
   // three call sites (OAuth callback and both SDK paths) in one place.
-  const isNewUser = !(await getUserByOpenId(user.openId));
+  //
+  // The auth SDK also calls this on every authenticated request with nothing
+  // but `{ openId, lastSignedIn }` to refresh the timestamp. A new account is
+  // never created by that call, so the probe is skipped for it rather than
+  // costing a query per request.
+  const isIdentitySync = Object.keys(user).some((key) => key !== "openId" && key !== "lastSignedIn");
+  const isNewUser = isIdentitySync && !(await getUserByOpenId(user.openId));
   await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
   if (isNewUser) {
     const created = await getUserByOpenId(user.openId);
@@ -158,6 +164,9 @@ export function startOfDay(date: Date) {
 
 const DAY_MS = 86_400_000;
 
+/** Streak lengths worth recording an event for. Crossing one is a real moment. */
+export const STREAK_MILESTONES = [3, 7, 14, 30, 50, 100, 365];
+
 /** Whole days between two midnights. */
 export function daysBetween(from: Date, to: Date) {
   return Math.round((startOfDay(to).getTime() - startOfDay(from).getTime()) / DAY_MS);
@@ -175,6 +184,18 @@ export function nextStreak(current: number, lastDailyDate: Date | null | undefin
   if (gap === 0) return Math.max(current, 1);
   if (gap === 1) return current + 1;
   return 1;
+}
+
+/**
+ * Whether a receipt may be resolved yet.
+ *
+ * A receipt declares when reality is supposed to have answered it. Resolving
+ * before that moment would let someone judge their own prediction early, which
+ * is the one thing the record is meant to prevent — so resolution is allowed at
+ * or after `resolutionDate`, and never before.
+ */
+export function canResolveAt(resolutionDate: Date | string, now: Date = new Date()) {
+  return now.getTime() >= new Date(resolutionDate).getTime();
 }
 
 /**
@@ -199,6 +220,9 @@ export async function recordDailyActivity(userId: number, dailyChallengeId: numb
   const longestStreak = Math.max(user.longestStreak, currentStreak);
   await db.insert(dailyActivity).values({ userId, activityDate: today, dailyChallengeId, receiptId, streakAfter: currentStreak });
   await db.update(users).set({ currentStreak, longestStreak, lastDailyDate: today }).where(eq(users.id, userId));
+  if (STREAK_MILESTONES.includes(currentStreak)) {
+    await trackEvent("streak_milestone", userId, { streak: currentStreak });
+  }
   return { currentStreak, longestStreak };
 }
 
@@ -258,6 +282,28 @@ export async function getRetentionSummary(days = 14) {
       retention: previous.size ? Math.round((returning / previous.size) * 100) : 0,
     };
   });
+}
+
+/**
+ * Records that an authenticated user is active today, emitting `user_returned`
+ * the first time they appear on a day later than their last active day.
+ *
+ * Writes at most once per user per day, and never throws into the request that
+ * triggered it — a missed data point must not cost someone their page load.
+ */
+export async function recordUserReturn(user: { id: number; lastActiveDate?: Date | null }) {
+  try {
+    const db = await getDb();
+    if (!db) return;
+    const today = startOfDay(new Date());
+    if (user.lastActiveDate && startOfDay(user.lastActiveDate).getTime() === today.getTime()) return;
+    await db.update(users).set({ lastActiveDate: today }).where(eq(users.id, user.id));
+    if (user.lastActiveDate) {
+      await trackEvent("user_returned", user.id, { daysSinceLastActive: daysBetween(user.lastActiveDate, today) });
+    }
+  } catch (error) {
+    console.warn("[Analytics] Failed to record return visit:", error);
+  }
 }
 
 // ---------------------------------------------------------------------------

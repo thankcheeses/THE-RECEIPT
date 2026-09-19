@@ -7,7 +7,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { challenges, dailyChallenges, receipts, users } from "../drizzle/schema";
-import { countUnreadNotifications, createNotification, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getRetentionSummary, getUserById, getUserByUsername, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
+import { canResolveAt, countUnreadNotifications, createNotification, recordUserReturn, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getRetentionSummary, getUserById, getUserByUsername, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
 
 const categorySchema = z.enum(CATEGORIES);
 const statusSchema = z.enum(["RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]);
@@ -15,13 +15,16 @@ const statusSchema = z.enum(["RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]);
 // A closed vocabulary keeps the events table queryable — an open string field
 // fills up with typos and one-off names that nobody can aggregate later.
 export const ANALYTICS_EVENTS = [
+  "landing_view",
   "signup",
+  "user_returned",
   "daily_answered",
   "receipt_created",
   "receipt_shared",
   "receipt_resolved",
   "challenge_created",
   "challenge_accepted",
+  "streak_milestone",
 ] as const;
 const analyticsEventSchema = z.enum(ANALYTICS_EVENTS);
 
@@ -43,7 +46,12 @@ async function ensureDailyChallenge() {
 export const appRouter = router({
   system: systemRouter,
   auth: router({
-    me: publicProcedure.query((opts) => opts.ctx.user),
+    me: publicProcedure.query(async (opts) => {
+      // The client calls this on every load, which makes it the natural place
+      // to notice that someone came back on a later day.
+      if (opts.ctx.user) await recordUserReturn(opts.ctx.user);
+      return opts.ctx.user;
+    }),
     logout: publicProcedure.mutation(({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
@@ -131,6 +139,12 @@ export const appRouter = router({
       const receipt = await getReceiptById(input.id);
       if (!receipt || receipt.userId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "You can only resolve your own receipts." });
       if (!["PENDING", "LOCKED"].includes(receipt.status)) throw new TRPCError({ code: "BAD_REQUEST", message: "This receipt is already resolved." });
+      if (!canResolveAt(receipt.resolutionDate)) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `This receipt resolves on ${new Date(receipt.resolutionDate).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}. Come back then.`,
+        });
+      }
       await db.update(receipts).set({ status: input.result, result: input.note ?? null, resolvedAt: new Date() }).where(eq(receipts.id, input.id));
       const stats = await getProfileStats(ctx.user.id);
       await db.update(users).set({ accuracy: stats.accuracy }).where(eq(users.id, ctx.user.id));
