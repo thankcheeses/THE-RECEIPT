@@ -10,6 +10,7 @@
 - Added an append-only `analyticsEvents` table and a closed event vocabulary covering signup, daily answers, receipt creation, sharing, and resolution.
 - Added an admin-only `analytics.summary` procedure returning 30-day event totals and 14-day retention.
 - Extended the GitHub Pages static demo to cover every new procedure, so the published build keeps working without a server.
+- Removed internal planning and handoff documentation from the repository and rewrote `README.md` as a public project readme.
 
 ## 1.0.0 — MVP baseline
 
@@ -21,10 +22,4 @@
 - Added public shareable receipt URLs with private receipt protection.
 - Added resolution states and profile accuracy aggregation.
 - Added demo-labeled receipts and leaderboard rows for non-empty MVP presentation.
-- Added domain and auth tests, interaction audit, and responsive visual verification.
-
-## Repository preparation
-
-- Added README, handoff, product, design system, architecture, data model, contributing, roadmap, and environment documentation.
-- Added `.env.example` and verified ignore rules for credentials, build output, logs, and local metadata.
-- Prepared a self-contained source export for transfer to a GitHub repository under `thankcheeses`.
+- Added domain and auth tests, and responsive visual verification.

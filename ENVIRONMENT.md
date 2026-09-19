@@ -15,4 +15,4 @@ The deployment needs the following environment variables. Provide real values th
 | `VITE_ANALYTICS_ENDPOINT` | Optional analytics script endpoint |
 | `VITE_ANALYTICS_WEBSITE_ID` | Optional analytics site identifier |
 
-The Manus WebDev environment already manages these values for the configured project. This repository export intentionally contains no secret values. A `.env.example` file was not generated because the active WebDev environment protects environment files and requires its secret-request workflow for any such file mutation; `ENVIRONMENT.md` is the safe, equivalent variable reference for GitHub handoff.
+This repository contains no secret values. Supply them through your host's secret manager or a local `.env` file, which is gitignored.
