@@ -2,7 +2,7 @@
 
 ## Before changing code
 
-Read `README.md`, `HANDOFF.md`, `PRODUCT.md`, `DESIGN_SYSTEM.md`, `ARCHITECTURE.md`, and `INTERACTION_AUDIT.md`. Treat the current receipt-paper visual system and prediction loop as the baseline. Do not redesign the product or add AI, betting, payments, or generic dashboard behavior without an explicit product decision.
+Read `README.md` and look through the existing code before changing it. Treat the current receipt-paper visual system and the predict/lock/resolve loop as the baseline rather than a starting point to redesign.
 
 ## Development loop
 
@@ -29,7 +29,7 @@ Keep changes focused and describe user-visible behavior in commit messages. Do n
 
 ## Pull request checklist
 
-- [ ] Product behavior strengthens discovery, prediction, anticipation, resolution, identity, competition, or sharing.
+- [ ] The change preserves the predict → lock → resolve loop and the receipt visual identity.
 - [ ] No secrets or private environment values are included.
 - [ ] `pnpm check` passes.
 - [ ] `pnpm test` passes.
