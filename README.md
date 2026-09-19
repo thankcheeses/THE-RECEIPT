@@ -14,6 +14,9 @@ There is no money, betting, or wagering in the product.
 
 - **Daily challenge** — one prompt a day from a catalog of 50+ prompts across nine categories, with a YES/NO answer and a confidence level.
 - **Custom receipts** — free-text predictions with a category, resolution date, confidence, and public/private visibility.
+- **Kinds of receipt** — the author says whether a receipt is a Prediction, Goal, Personal, or Fun. That choice decides what other people can do with it: you can disagree with a claim about the world, but a goal gets support instead.
+- **Me too** — writing your own receipt after someone else's. It is not a reaction: it creates a real, independently locked receipt that remembers which one it followed.
+- **Resolving soon** — open public receipts ordered by how close they are to their resolution date.
 - **Immutable records** — no edit path exists; the only post-creation change is resolution by the owner.
 - **Resolution** — RIGHT, WRONG, PARTIALLY RIGHT, or TOO EARLY, with an optional note.
 - **Public receipt URLs** — `/r/:id` is shareable without signing in; private receipts are never returned by the public procedure.
@@ -25,6 +28,21 @@ There is no money, betting, or wagering in the product.
 - **Profiles** — accuracy, category breakdown, confidence calibration, biggest call, and biggest miss.
 - **Analytics** — a small closed event vocabulary covering signup, receipt creation, sharing, and resolution.
 - **Sharing** — one interface with platform adapters: OS share sheet, copy link, and composer intents for X, Bluesky, WhatsApp, Reddit and Facebook.
+
+## Interaction policy
+
+What a receipt offers depends on what kind of statement it is, not on its category. The policy lives in `shared/interactionPolicy.ts` and is used by both the client (which buttons to draw) and the server (which responses to accept), so the two cannot drift. The server is authoritative — a disallowed response is rejected even if the request bypasses the UI.
+
+| Kind | Responses | Always available |
+| --- | --- | --- |
+| Prediction | I agree · I disagree | Me too · Share |
+| Goal | Support | Me too · Share |
+| Personal | Support | Me too · Share |
+| Fun | React | Me too · Share |
+
+Support and agreement are stored as distinct interaction types. "147 people support this goal" and "147 people agree this will happen" are different facts, and merging them would lose the difference permanently.
+
+Categories and kinds are independent: one category holds several kinds. A category only suggests a starting point, and the author's choice is what is stored.
 
 ## Routes
 
