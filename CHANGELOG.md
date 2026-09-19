@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Added a sharing abstraction with platform adapters: OS share sheet, copy link, composer intents for X, Bluesky, WhatsApp, Reddit and Facebook, and a receipt-image download for platforms that have no web intent. Nothing posts on the user's behalf.
+
+- Added a public feed at `/feed`: newest-first, category filters, keyset pagination, and empty/loading/error states, built on the existing public-receipt data.
+- Added public profiles at `/u/:username`, showing only public receipts with statistics computed over public receipts alone.
+- Added indexes covering the feed's access paths on `receipts`.
+
+- Added server-rendered social previews for public receipts: per-receipt Open Graph and Twitter card metadata on `/r/:id`, plus a generated 1200×630 PNG at `/r/:id/image.png` drawn from the existing receipt design. Private receipts get neither.
+
+- Resolution now requires the receipt to be due: `receipts.resolve` rejects any attempt before the declared `resolutionDate`, and the detail page shows a "not due yet" state instead of buttons that would fail.
+- Added `landing_view`, `user_returned`, and `streak_milestone` analytics events, plus `users.lastActiveDate` to detect a return visit (`lastSignedIn` is refreshed on every request and cannot).
+- Added an admin-only `/analytics` route rendering 30-day event totals and 14-day retention from real recorded events.
+- Added a CI workflow running typecheck, tests, and both builds on pull requests and pushes to `main`.
+- The per-request auth refresh no longer triggers the signup-detection query.
+
 - Added real streak calculation: `users.lastDailyDate` plus a `dailyActivity` table, advanced on each daily answer and idempotent per day.
 - Added daily retention tracking — `getRetentionSummary()` reports day-over-day active and returning users; `getDailyActivityWindow()` backs the per-user week view.
 - Replaced the daily page's hardcoded "0 DAYS" and static dots with the signed-in user's real streak and last seven days.

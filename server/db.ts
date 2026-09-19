@@ -1,7 +1,9 @@
-import { and, count, desc, eq, gte, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertUser, users, receipts, dailyChallenges, challenges, achievements, dailyActivity, notifications, analyticsEvents } from "../drizzle/schema";
 import { ENV } from "./_core/env";
+
+const RESOLVED_STATUSES: string[] = ["RIGHT", "WRONG", "PARTIALLY RIGHT"];
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -46,7 +48,13 @@ export async function upsertUser(user: InsertUser): Promise<void> {
   // Checked before the upsert so `signup` fires once, on the real first
   // sign-in, rather than on every subsequent one. Tracking it here covers all
   // three call sites (OAuth callback and both SDK paths) in one place.
-  const isNewUser = !(await getUserByOpenId(user.openId));
+  //
+  // The auth SDK also calls this on every authenticated request with nothing
+  // but `{ openId, lastSignedIn }` to refresh the timestamp. A new account is
+  // never created by that call, so the probe is skipped for it rather than
+  // costing a query per request.
+  const isIdentitySync = Object.keys(user).some((key) => key !== "openId" && key !== "lastSignedIn");
+  const isNewUser = isIdentitySync && !(await getUserByOpenId(user.openId));
   await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
   if (isNewUser) {
     const created = await getUserByOpenId(user.openId);
@@ -112,6 +120,114 @@ export async function getRecentPublicReceipts(limit = 6) {
   return db.select({ receipt: receipts, user: users }).from(receipts).leftJoin(users, eq(receipts.userId, users.id)).where(eq(receipts.visibility, "PUBLIC")).orderBy(desc(receipts.createdAt)).limit(limit);
 }
 
+/**
+ * A page of the public feed, newest first.
+ *
+ * Keyset pagination on `id`: the cursor is the last id of the previous page,
+ * so pages stay stable while new receipts arrive — an OFFSET would shift rows
+ * under the reader.
+ */
+export async function getPublicFeed(options: { cursor?: number; category?: string; limit?: number } = {}) {
+  const limit = Math.min(Math.max(options.limit ?? 12, 1), 50);
+  const db = await getDb();
+  if (!db) return { items: [], nextCursor: null as number | null };
+  const filters = [eq(receipts.visibility, "PUBLIC")];
+  if (options.category) filters.push(eq(receipts.category, options.category));
+  if (options.cursor) filters.push(lt(receipts.id, options.cursor));
+  // One extra row tells us whether another page exists without a count query.
+  const rows = await db
+    .select({ receipt: receipts, user: users })
+    .from(receipts)
+    .leftJoin(users, eq(receipts.userId, users.id))
+    .where(and(...filters))
+    .orderBy(desc(receipts.id))
+    .limit(limit + 1);
+  return buildFeedPage(rows, limit);
+}
+
+/**
+ * Turns an over-fetched row set into a page.
+ *
+ * The caller asks the database for `limit + 1` rows; the extra one is the
+ * signal that another page exists, and is dropped from the result. The cursor
+ * is the last id actually returned, so the next query resumes below it.
+ */
+export function buildFeedPage(
+  rows: Array<{ receipt: { id: number }; user?: Parameters<typeof toPublicUser>[0] }>,
+  limit: number,
+) {
+  const items = rows.slice(0, limit);
+  return {
+    items: items.map((row) => ({ receipt: row.receipt, user: toPublicUser(row.user) })),
+    nextCursor: rows.length > limit ? (items[items.length - 1]?.receipt.id ?? null) : null,
+  };
+}
+
+/**
+ * The subset of a user row that may be shown to anyone. Everything omitted —
+ * openId, email, role, sign-in timestamps — is either identifying or internal.
+ */
+export function toPublicUser(user: typeof users.$inferSelect | null | undefined) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    username: user.username,
+    name: user.name,
+    avatar: user.avatar,
+    currentStreak: user.currentStreak,
+    longestStreak: user.longestStreak,
+    accuracy: user.accuracy,
+    createdAt: user.createdAt,
+  };
+}
+
+export async function listPublicReceiptsForUser(userId: number, limit = 12) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(receipts)
+    .where(and(eq(receipts.userId, userId), eq(receipts.visibility, "PUBLIC")))
+    .orderBy(desc(receipts.id))
+    .limit(limit);
+}
+
+/**
+ * Profile statistics computed over public receipts only.
+ *
+ * getProfileStats() spans everything a user has written, which is right for
+ * their own profile and wrong for a public one: aggregates over private rows
+ * would describe predictions the viewer is not allowed to see.
+ */
+export async function getPublicProfileStats(userId: number) {
+  const all = await listPublicReceiptsForUser(userId, 1000);
+  const resolved = all.filter((receipt) => RESOLVED_STATUSES.includes(receipt.status));
+  const right = resolved.filter((receipt) => receipt.status === "RIGHT");
+  const accuracy = resolved.length ? Math.round((right.length / resolved.length) * 100) : 0;
+  const byCategory = Object.entries(
+    all.reduce<Record<string, { total: number; resolved: number; right: number }>>((acc, receipt) => {
+      const current = acc[receipt.category] ?? { total: 0, resolved: 0, right: 0 };
+      current.total++;
+      if (RESOLVED_STATUSES.includes(receipt.status)) current.resolved++;
+      if (receipt.status === "RIGHT") current.right++;
+      acc[receipt.category] = current;
+      return acc;
+    }, {}),
+  ).map(([category, stats]) => ({
+    category,
+    accuracy: stats.resolved ? Math.round((stats.right / stats.resolved) * 100) : 0,
+    total: stats.total,
+  }));
+  return {
+    total: all.length,
+    resolved: resolved.length,
+    right: right.length,
+    pending: all.length - resolved.length,
+    accuracy,
+    byCategory,
+  };
+}
+
 export async function getChallengeById(id: number) {
   const db = await getDb();
   if (!db) return undefined;
@@ -158,6 +274,9 @@ export function startOfDay(date: Date) {
 
 const DAY_MS = 86_400_000;
 
+/** Streak lengths worth recording an event for. Crossing one is a real moment. */
+export const STREAK_MILESTONES = [3, 7, 14, 30, 50, 100, 365];
+
 /** Whole days between two midnights. */
 export function daysBetween(from: Date, to: Date) {
   return Math.round((startOfDay(to).getTime() - startOfDay(from).getTime()) / DAY_MS);
@@ -175,6 +294,18 @@ export function nextStreak(current: number, lastDailyDate: Date | null | undefin
   if (gap === 0) return Math.max(current, 1);
   if (gap === 1) return current + 1;
   return 1;
+}
+
+/**
+ * Whether a receipt may be resolved yet.
+ *
+ * A receipt declares when reality is supposed to have answered it. Resolving
+ * before that moment would let someone judge their own prediction early, which
+ * is the one thing the record is meant to prevent — so resolution is allowed at
+ * or after `resolutionDate`, and never before.
+ */
+export function canResolveAt(resolutionDate: Date | string, now: Date = new Date()) {
+  return now.getTime() >= new Date(resolutionDate).getTime();
 }
 
 /**
@@ -199,6 +330,9 @@ export async function recordDailyActivity(userId: number, dailyChallengeId: numb
   const longestStreak = Math.max(user.longestStreak, currentStreak);
   await db.insert(dailyActivity).values({ userId, activityDate: today, dailyChallengeId, receiptId, streakAfter: currentStreak });
   await db.update(users).set({ currentStreak, longestStreak, lastDailyDate: today }).where(eq(users.id, userId));
+  if (STREAK_MILESTONES.includes(currentStreak)) {
+    await trackEvent("streak_milestone", userId, { streak: currentStreak });
+  }
   return { currentStreak, longestStreak };
 }
 
@@ -258,6 +392,28 @@ export async function getRetentionSummary(days = 14) {
       retention: previous.size ? Math.round((returning / previous.size) * 100) : 0,
     };
   });
+}
+
+/**
+ * Records that an authenticated user is active today, emitting `user_returned`
+ * the first time they appear on a day later than their last active day.
+ *
+ * Writes at most once per user per day, and never throws into the request that
+ * triggered it — a missed data point must not cost someone their page load.
+ */
+export async function recordUserReturn(user: { id: number; lastActiveDate?: Date | null }) {
+  try {
+    const db = await getDb();
+    if (!db) return;
+    const today = startOfDay(new Date());
+    if (user.lastActiveDate && startOfDay(user.lastActiveDate).getTime() === today.getTime()) return;
+    await db.update(users).set({ lastActiveDate: today }).where(eq(users.id, user.id));
+    if (user.lastActiveDate) {
+      await trackEvent("user_returned", user.id, { daysSinceLastActive: daysBetween(user.lastActiveDate, today) });
+    }
+  } catch (error) {
+    console.warn("[Analytics] Failed to record return visit:", error);
+  }
 }
 
 // ---------------------------------------------------------------------------

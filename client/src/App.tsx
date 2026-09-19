@@ -2,13 +2,16 @@ import { startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 import { DEMO_RECEIPTS, CATEGORIES, type Category } from "@shared/seed";
-import { ArrowRight, BarChart3, Bell, Check, ChevronRight, Clock3, Copy, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, Sparkles, Target, Trophy, UserRound, X, Zap } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Activity, ArrowRight, BarChart3, Bell, Check, ChevronRight, Clock3, Copy, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, Sparkles, Target, Trophy, UserRound, X, Zap } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, Route, Router as WouterRouter, Switch, useLocation, useRoute } from "wouter";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
+import { SHARE_TARGETS } from "@/lib/sharing/adapters";
+import { availableTargets, runShare, type ShareContext } from "@/lib/sharing/core";
+import { IS_STATIC_DEMO } from "@/lib/staticDemo";
 
 const dateLabel = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
 const shortDate = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" }) : "—";
@@ -54,6 +57,7 @@ function Header() {
     <Link href="/" className="brand"><span className="brand-mark">R</span><span>THE RECEIPT</span></Link>
     <nav className={`main-nav ${menuOpen ? "open" : ""}`}>
       <Link href="/daily" onClick={() => setMenuOpen(false)}>Today</Link>
+      <Link href="/feed" onClick={() => setMenuOpen(false)}>Feed</Link>
       <Link href="/receipts" onClick={() => setMenuOpen(false)}>My receipts</Link>
       <Link href="/challenges" onClick={() => setMenuOpen(false)}>Challenges</Link>
       <Link href="/leaderboard" onClick={() => setMenuOpen(false)}>Leaderboard</Link>
@@ -93,7 +97,22 @@ function ReceiptPaper({ receipt, demo = false, compact = false }: { receipt: any
 
 function SectionLabel({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) { return <div className="section-label"><span>{children}</span>{action}</div>; }
 
+/** Fires a one-off analytics event when a page mounts. */
+function usePageEvent(event: "landing_view") {
+  const track = trpc.analytics.track.useMutation();
+  const sent = useRef(false);
+  useEffect(() => {
+    if (sent.current) return;
+    sent.current = true;
+    track.mutate({ event });
+    // The mutation object is recreated each render; the ref guard is what
+    // keeps this to one event per mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [event]);
+}
+
 function Home() {
+  usePageEvent("landing_view");
   const { data: daily } = trpc.daily.get.useQuery();
   const { data: publicReceipts } = trpc.receipts.recentPublic.useQuery();
   const featured = publicReceipts?.slice(0, 3) ?? [];
@@ -158,6 +177,39 @@ function Create() {
   return <Page eyebrow="CUSTOM RECEIPT" title="Say it with your chest." description="The prediction is yours. The timestamp is ours."><div className="create-layout"><div className="form-card"><label className="field-label">WHAT DO YOU THINK WILL HAPPEN?<textarea value={prediction} onChange={(event) => setPrediction(event.target.value)} maxLength={280} placeholder="I think…" rows={4} /><span className="char-count">{prediction.length}/280</span></label><div className="form-grid"><label className="field-label">CATEGORY<select value={category} onChange={(event) => setCategory(event.target.value as Category)}>{CATEGORIES.map((item) => <option key={item}>{item}</option>)}</select></label><label className="field-label">RESOLUTION DATE<input type="date" value={resolutionDate} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setResolutionDate(event.target.value)} /></label></div><div className="confidence-block form-confidence"><div className="confidence-head"><span>HOW CONFIDENT?</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>VIBES</span><span>ABSOLUTE FACT (TO ME)</span></div></div><label className="field-label">CHALLENGE SOMEONE <span className="optional">OPTIONAL</span><input value={challengeUsername} onChange={(event) => setChallengeUsername(event.target.value)} placeholder="@username" /></label><div className="visibility-toggle"><button className={visibility === "PUBLIC" ? "active" : ""} onClick={() => setVisibility("PUBLIC")}>PUBLIC <span>Shareable link</span></button><button className={visibility === "PRIVATE" ? "active" : ""} onClick={() => setVisibility("PRIVATE")}>PRIVATE <span>Just for you</span></button></div><label className="confirm-row"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>Once you print it, you can’t edit it. I understand future-me may disagree.</span></label><button className="button button-dark button-wide" disabled={!prediction.trim() || !confirmed || mutation.isPending} onClick={submit}><LockKeyhole size={17} /> {mutation.isPending ? "PRINTING…" : "LOCK IT IN"}</button>{mutation.error && <div className="error-message">{mutation.error.message}</div>}</div><div className="preview-column"><span className="eyebrow">LIVE PREVIEW</span><ReceiptPaper receipt={{ id: "4821", receiptNumber: "004821", prediction: prediction || "Your prediction goes here.", category, confidence, status: "PENDING", createdAt: new Date(), resolutionDate }} /><p className="preview-caption">This is what your future self will find.</p></div></div></Page>;
 }
 
+/**
+ * The share surface. Targets come from the sharing adapters, so this component
+ * holds no platform URLs and gains new platforms without changing.
+ */
+function ShareSheet({ context, onShared }: { context: ShareContext; onShared: (method: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const targets = availableTargets(SHARE_TARGETS, context);
+  const primary = targets.filter((target) => target.kind === "native" || target.kind === "clipboard");
+  const rest = targets.filter((target) => target.kind !== "native" && target.kind !== "clipboard");
+
+  const activate = async (target: (typeof targets)[number]) => {
+    const outcome = await runShare(target, context);
+    if (outcome.message) (outcome.ok ? toast.success : toast.error)(outcome.message);
+    if (outcome.ok) onShared(outcome.method);
+  };
+
+  return <div className="share-sheet">
+    <div className="detail-actions">
+      {primary.map((target) => <button key={target.id} className={target.id === "copy" ? "button button-dark" : "button button-secondary"} onClick={() => activate(target)}>
+        {target.id === "copy" ? <Copy size={16} /> : <Share2 size={16} />} {target.label.toUpperCase()}
+      </button>)}
+      <button className="button button-secondary" onClick={() => setOpen((value) => !value)} aria-expanded={open}>{open ? "FEWER OPTIONS" : "MORE PLACES"}</button>
+    </div>
+    {open && <div className="share-targets">
+      {rest.map((target) => <button key={target.id} className="share-target" onClick={() => activate(target)}>
+        <strong>{target.label}</strong>
+        <span>{target.note}</span>
+      </button>)}
+      <p className="share-disclaimer">Nothing is posted for you. These open each platform's own composer with the text ready, and you decide whether to send it.</p>
+    </div>}
+  </div>;
+}
+
 function ReceiptDetail() {
   const [, params] = useRoute("/receipt/:id");
   const [, publicParams] = useRoute("/r/:id");
@@ -172,20 +224,26 @@ function ReceiptDetail() {
   // Sharing happens entirely in the browser, so it is the one event the server
   // cannot observe on its own.
   const track = trpc.analytics.track.useMutation();
-  const copy = async () => {
-    await navigator.clipboard?.writeText(window.location.href);
-    track.mutate({ event: "receipt_shared", properties: { receiptId: id, method: "copy", surface: isPublic ? "public" : "owner" } });
-    toast.success("Receipt link copied.");
-  };
-  const share = async () => {
-    if (navigator.share) {
-      await navigator.share({ title: "THE RECEIPT", text: "Put it on the record.", url: window.location.href });
-      track.mutate({ event: "receipt_shared", properties: { receiptId: id, method: "web-share", surface: isPublic ? "public" : "owner" } });
-    } else {
-      await copy();
-    }
-  };
-  return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><div className="detail-actions"><button className="button button-dark" onClick={copy}><Copy size={16} /> COPY RECEIPT LINK</button><button className="button button-secondary" onClick={share}><Share2 size={16} /> SHARE</button></div>{!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && <div className="resolve-box"><div><span className="eyebrow">TIME TO FACE THE MUSIC?</span><h3>How did it go?</h3></div><div className="resolve-actions"><button onClick={() => resolveMutation.mutate({ id, result: "RIGHT" })} className="result-button right">RIGHT</button><button onClick={() => resolveMutation.mutate({ id, result: "PARTIALLY RIGHT" })} className="result-button partial">PARTIAL</button><button onClick={() => resolveMutation.mutate({ id, result: "WRONG" })} className="result-button wrong">WRONG</button><button onClick={() => resolveMutation.mutate({ id, result: "TOO EARLY" })} className="result-button early">TOO EARLY</button></div></div>}</div><aside className="detail-aside"><div className="share-hook"><Sparkles size={20} /><span className="eyebrow">YOUR TURN</span><h3>What do <em>you</em> think will happen?</h3><ButtonLink href="/create">MAKE YOUR RECEIPT</ButtonLink></div><div className="detail-meta"><span>RECEIPT DETAILS</span><dl><dt>CREATOR</dt><dd>{user?.username || user?.name || "You"}</dd><dt>STATUS</dt><dd className={statusClass(receipt.status)}>{receipt.status}</dd><dt>CONFIDENCE</dt><dd>{receipt.confidence}%</dd><dt>RESOLVES</dt><dd>{dateLabel(receipt.resolutionDate)}</dd></dl></div></aside></> : <div className="empty-state"><ReceiptText size={34} /><h3>That receipt is missing.</h3><p>It may be private, or the number may have been typed with too much confidence.</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}</div></Page>;
+  // The server refuses resolution before resolutionDate, so the buttons only
+  // appear once the receipt is actually due.
+  const isDue = receipt ? Date.now() >= new Date(receipt.resolutionDate).getTime() : false;
+  const shareContext: ShareContext = useMemo(() => {
+    const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+    const canonical = `${window.location.origin}${base}/r/${id}`;
+    return {
+      url: canonical,
+      title: receipt ? `Receipt #${String(receipt.id).padStart(6, "0")} — THE RECEIPT` : "THE RECEIPT",
+      text: receipt ? `I was ${receipt.confidence}% sure: “${receipt.prediction}”` : "Put it on the record.",
+      // The card is rendered by the Node app; the static demo has no such
+      // endpoint, so image-bearing targets are simply not offered there.
+      imageUrl: receipt && !IS_STATIC_DEMO ? `${canonical}/image.png` : null,
+      receiptId: id,
+    };
+  }, [id, receipt]);
+  const onShared = (method: string) =>
+    track.mutate({ event: "receipt_shared", properties: { receiptId: id, method, surface: isPublic ? "public" : "owner" } });
+  return <Page eyebrow={isPublic ? "PUBLIC RECEIPT" : "YOUR RECEIPT"} title={receipt ? `Receipt #${String(receipt.id).padStart(6, "0")}` : "Receipt not found"} description={user?.name ? `A call from ${user.username || user.name}.` : "A permanent record of a prediction."}><div className="detail-layout">{receipt ? <><div><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} /><ShareSheet context={shareContext} onShared={onShared} />{!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && !isDue && <div className="resolve-box pending-box"><div><span className="eyebrow">NOT DUE YET</span><h3>Reality is still working on it.</h3><p className="muted">This receipt resolves {dateLabel(receipt.resolutionDate)}. You can record the result then — not before.</p></div><div className="pending-clock"><Clock3 size={26} /></div></div>}
+      {!isPublic && ["PENDING", "LOCKED"].includes(receipt.status) && isDue && <div className="resolve-box"><div><span className="eyebrow">TIME TO FACE THE MUSIC?</span><h3>How did it go?</h3></div><div className="resolve-actions"><button onClick={() => resolveMutation.mutate({ id, result: "RIGHT" })} className="result-button right">RIGHT</button><button onClick={() => resolveMutation.mutate({ id, result: "PARTIALLY RIGHT" })} className="result-button partial">PARTIAL</button><button onClick={() => resolveMutation.mutate({ id, result: "WRONG" })} className="result-button wrong">WRONG</button><button onClick={() => resolveMutation.mutate({ id, result: "TOO EARLY" })} className="result-button early">TOO EARLY</button></div></div>}</div><aside className="detail-aside"><div className="share-hook"><Sparkles size={20} /><span className="eyebrow">YOUR TURN</span><h3>What do <em>you</em> think will happen?</h3><ButtonLink href="/create">MAKE YOUR RECEIPT</ButtonLink></div><div className="detail-meta"><span>RECEIPT DETAILS</span><dl><dt>CREATOR</dt><dd>{user?.username || user?.name || "You"}</dd><dt>STATUS</dt><dd className={statusClass(receipt.status)}>{receipt.status}</dd><dt>CONFIDENCE</dt><dd>{receipt.confidence}%</dd><dt>RESOLVES</dt><dd>{dateLabel(receipt.resolutionDate)}</dd></dl></div></aside></> : <div className="empty-state"><ReceiptText size={34} /><h3>That receipt is missing.</h3><p>It may be private, or the number may have been typed with too much confidence.</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}</div></Page>;
 }
 
 function MyReceipts() {
@@ -232,6 +290,70 @@ function ChallengeDetail() {
   </Page>;
 }
 
+/**
+ * Public discovery. Deliberately the simplest thing that works: newest first,
+ * one optional category, keyset "load more". No ranking, no personalisation.
+ */
+function Feed() {
+  const [category, setCategory] = useState<Category | null>(null);
+  const [pages, setPages] = useState<number[]>([]);
+  const cursor = pages[pages.length - 1];
+  const input = useMemo(() => ({ ...(category ? { category } : {}), ...(cursor ? { cursor } : {}) }), [category, cursor]);
+  const { data, isLoading, isFetching, error } = trpc.receipts.feed.useQuery(input);
+  const [items, setItems] = useState<any[]>([]);
+
+  // Pages accumulate; changing the filter starts over.
+  useEffect(() => { setPages([]); setItems([]); }, [category]);
+  useEffect(() => {
+    if (!data) return;
+    setItems((current) => {
+      const seen = new Set(current.map((item) => item.receipt.id));
+      return [...current, ...data.items.filter((item: any) => !seen.has(item.receipt.id))];
+    });
+  }, [data]);
+
+  const chip = (value: Category | null, label: string) => (
+    <button key={label} className={category === value ? "active" : ""} onClick={() => setCategory(value)}>{label}</button>
+  );
+
+  return <Page eyebrow="PUBLIC RECEIPTS" title="The record so far." description="Every public call, newest first. Somebody is going to be wrong.">
+    <div className="feed-filters">{chip(null, "ALL")}{CATEGORIES.map((item) => chip(item, item))}</div>
+    {error ? <div className="empty-state"><ReceiptText size={32} /><h3>The feed could not load.</h3><p>{error.message}</p></div>
+      : items.length ? <>
+        <div className="feed-grid">{items.map((item) => <Link href={`/r/${item.receipt.id}`} key={item.receipt.id} className="feed-item">
+          <ReceiptPaper receipt={{ ...item.receipt, receiptNumber: String(item.receipt.id).padStart(6, "0") }} compact />
+          <span className="feed-caller">{item.user?.username ? `@${item.user.username}` : item.user?.name || "Anonymous"}</span>
+        </Link>)}</div>
+        {data?.nextCursor ? <div className="feed-more"><button className="button button-secondary" disabled={isFetching} onClick={() => setPages((current) => [...current, data.nextCursor!])}>{isFetching ? "LOADING…" : "LOAD MORE"}</button></div>
+          : <div className="feed-end">THAT IS EVERY PUBLIC RECEIPT{category ? ` IN ${category}` : ""}.</div>}
+      </>
+      : isLoading || isFetching ? <div className="loading-state">Loading receipts…</div>
+      : <div className="empty-state"><ReceiptText size={32} /><h3>{category ? `No public receipts in ${category} yet.` : "No public receipts yet."}</h3><p>{category ? "Try another category, or be the first." : "Be the first to put something on the record."}</p><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink></div>}
+  </Page>;
+}
+
+/** Someone else's public record. Private receipts never reach this page. */
+function PublicProfile() {
+  const [, params] = useRoute("/u/:username");
+  const username = params?.username ?? "";
+  const { data, isLoading, error } = trpc.profile.byUsername.useQuery({ username }, { enabled: Boolean(username), retry: false });
+  if (isLoading) return <Page eyebrow="PUBLIC PROFILE" title="…"><div className="loading-state">Loading profile…</div></Page>;
+  if (error || !data?.user) return <Page eyebrow="PUBLIC PROFILE" title="No such caller"><div className="empty-state"><UserRound size={32} /><h3>Nobody goes by that name.</h3><p>The username may have changed, or never existed.</p><ButtonLink href="/feed">BROWSE RECEIPTS</ButtonLink></div></Page>;
+  const { user, stats, receipts } = data;
+  return <Page eyebrow="PUBLIC PROFILE" title={user.username ? `@${user.username}` : user.name || "A caller"} description="Their public record. Private receipts are not shown.">
+    <div className="profile-stats">
+      <div><span>PUBLIC RECEIPTS</span><strong>{stats.total}</strong></div>
+      <div><span>RESOLVED</span><strong>{stats.resolved}</strong></div>
+      <div><span>ACCURACY</span><strong>{stats.accuracy}%</strong></div>
+      <div><span>STREAK</span><strong><Flame size={18} /> {user.currentStreak}</strong></div>
+    </div>
+    {stats.byCategory.length > 0 && <div className="profile-panel"><SectionLabel>CATEGORIES</SectionLabel>{stats.byCategory.slice(0, 5).map((item) => <div className="category-row" key={item.category}><span>{item.category}</span><strong>{item.accuracy}%</strong><div className="mini-bar"><i style={{ width: `${item.accuracy}%` }} /></div></div>)}</div>}
+    <SectionLabel>PUBLIC RECEIPTS</SectionLabel>
+    {receipts.length ? <div className="feed-grid">{receipts.map((receipt) => <Link href={`/r/${receipt.id}`} key={receipt.id}><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} compact /></Link>)}</div>
+      : <div className="empty-state compact"><ReceiptText size={28} /><h3>Nothing public yet.</h3><p>This caller keeps their receipts to themselves.</p></div>}
+  </Page>;
+}
+
 function Leaderboard() {
   const rows = [{ name: "Mina", handle: "@minacalls", right: 43, accuracy: 82, streak: 18, badge: "BEST ACCURACY" }, { name: "Jules", handle: "@julesonrecord", right: 51, accuracy: 74, streak: 11, badge: "MOST RIGHT" }, { name: "Tariq", handle: "@tariqpredicts", right: 38, accuracy: 71, streak: 27, badge: "LONGEST STREAK" }, { name: "Brianna", handle: "@brianna", right: 31, accuracy: 68, streak: 19, badge: "DEMO PROFILE" }];
   const [view, setView] = useState("MOST RIGHT");
@@ -249,11 +371,57 @@ function Profile() {
   return <Page eyebrow="YOUR REPUTATION" title={user.username ? user.username.toUpperCase() : "Your profile"} description="A little scoreboard for the things you were willing to say out loud."><div className="profile-top"><div className="profile-identity"><div className="profile-avatar">{(user.username || user.name || "R")[0].toUpperCase()}</div><div><h2>{user.username ? `@${user.username}` : "Choose a username"}</h2><span className="muted">{user.name || "New caller"}</span></div></div>{!user.username && <div className="username-form"><input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="your_username" /><button className="button button-dark" onClick={() => setUsernameMutation.mutate({ username })}>SAVE</button></div>}</div><div className="profile-stats"><div><span>RECEIPTS</span><strong>{stats.total}</strong></div><div><span>RESOLVED</span><strong>{stats.resolved}</strong></div><div><span>ACCURACY</span><strong>{stats.accuracy}%</strong></div><div><span>STREAK</span><strong><Flame size={18} /> {user.currentStreak || 0}</strong></div></div><div className="profile-grid"><div className="profile-panel"><SectionLabel>CONFIDENCE CALIBRATION</SectionLabel><div className="calibration"><div className="calibration-bar"><i style={{ width: `${Math.max(stats.accuracy, 8)}%` }} /></div><div className="calibration-labels"><span>LOW CONFIDENCE</span><strong>{stats.accuracy}% RIGHT</strong><span>HIGH CONFIDENCE</span></div></div><p className="muted">Your simple accuracy rate across resolved receipts. Calibration gets more interesting as the archive grows.</p></div><div className="profile-panel category-panel"><SectionLabel>BEST CATEGORIES</SectionLabel>{stats.byCategory.length ? stats.byCategory.slice(0, 3).map((item) => <div className="category-row" key={item.category}><span>{item.category}</span><strong>{item.accuracy}%</strong><div className="mini-bar"><i style={{ width: `${item.accuracy}%` }} /></div></div>) : <p className="muted">Your categories will appear after you resolve a few receipts.</p>}</div></div><div className="profile-highlights"><div className="highlight-card miss"><span className="eyebrow">BIGGEST MISS</span><strong>{stats.biggestMiss ? `${stats.biggestMiss.confidence}% CONFIDENCE` : "—"}</strong><p>{stats.biggestMiss?.prediction || "Your future self has not humbled you yet."}</p><b>{stats.biggestMiss ? "WRONG" : "PENDING"}</b></div><div className="highlight-card call"><span className="eyebrow">BIGGEST CALL</span><strong>{stats.biggestCall ? `${stats.biggestCall.confidence}% CONFIDENCE` : "—"}</strong><p>{stats.biggestCall?.prediction || "Make a bold call. We’ll keep the receipt."}</p><b>{stats.biggestCall ? "RIGHT" : "CALLER"}</b></div></div></Page>;
 }
 
+/**
+ * Admin-only read surface over the analytics table. Deliberately a plain
+ * readout of real recorded events and retention — enough to see where the loop
+ * breaks, without becoming an analytics product.
+ */
+function Analytics() {
+  const { isAuthenticated } = useAuth();
+  const { data, isLoading, error } = trpc.analytics.summary.useQuery(undefined, { enabled: isAuthenticated, retry: false });
+  if (!isAuthenticated) return <Page eyebrow="INTERNAL" title="Analytics"><AuthPrompt title="Sign in to continue." description="This page is only available to administrators." /></Page>;
+  if (error) return <Page eyebrow="INTERNAL" title="Analytics"><div className="empty-state"><LockKeyhole size={30} /><h3>Not your page.</h3><p>Analytics are restricted to administrators.</p><ButtonLink href="/">BACK HOME</ButtonLink></div></Page>;
+  if (isLoading || !data) return <Page eyebrow="INTERNAL" title="Analytics"><div className="loading-state">Loading analytics…</div></Page>;
+  const totals = new Map(data.events.map((row) => [row.event, Number(row.total)]));
+  // The order the loop actually runs in, so gaps read as gaps.
+  const funnel = ["landing_view", "signup", "receipt_created", "daily_answered", "receipt_shared", "receipt_resolved", "challenge_created", "challenge_accepted", "user_returned", "streak_milestone"];
+  const peak = Math.max(1, ...funnel.map((event) => totals.get(event) ?? 0));
+  return <Page eyebrow="INTERNAL · ADMIN ONLY" title="Analytics" description="Recorded events over the last 30 days and day-over-day retention over the last 14.">
+    <div className="analytics-grid">
+      <div className="profile-panel">
+        <SectionLabel>EVENTS · 30 DAYS</SectionLabel>
+        {funnel.map((event) => {
+          const total = totals.get(event) ?? 0;
+          return <div className="category-row" key={event}>
+            <span>{event.replace(/_/g, " ").toUpperCase()}</span>
+            <strong>{total}</strong>
+            <div className="mini-bar"><i style={{ width: `${Math.round((total / peak) * 100)}%` }} /></div>
+          </div>;
+        })}
+        <p className="muted">Counts are of events actually recorded. A zero means the action has not happened, not that it is untracked.</p>
+      </div>
+      <div className="profile-panel">
+        <SectionLabel>DAILY RETENTION · 14 DAYS</SectionLabel>
+        <div className="retention-table">
+          <div className="retention-head"><span>DAY</span><span>ACTIVE</span><span>RETURNED</span><span>RATE</span></div>
+          {data.retention.map((row) => <div className="retention-row" key={String(row.date)}>
+            <span>{shortDate(row.date)}</span>
+            <strong>{row.active}</strong>
+            <strong>{row.returning}</strong>
+            <strong>{row.retention}%</strong>
+          </div>)}
+        </div>
+        <p className="muted">“Returned” counts people active on a day who were also active the day before. Rate is that share of the previous day’s actives.</p>
+      </div>
+    </div>
+  </Page>;
+}
+
 function AuthPrompt({ title, description }: { title: string; description: string }) { return <div className="auth-prompt"><LockKeyhole size={24} /><h3>{title}</h3><p>{description}</p><button className="button button-dark" onClick={() => startLogin()}>SIGN IN TO CONTINUE <ArrowRight size={16} /></button></div>; }
 
 function NotFound() { return <Page title="404"><div className="empty-state"><ReceiptText size={34} /><h3>This page is off the record.</h3><ButtonLink href="/">BACK HOME</ButtonLink></div></Page>; }
 
-function Router() { return <Switch><Route path="/" component={Home} /><Route path="/daily" component={Daily} /><Route path="/create" component={Create} /><Route path="/receipts" component={MyReceipts} /><Route path="/receipt/:id" component={ReceiptDetail} /><Route path="/r/:id" component={ReceiptDetail} /><Route path="/challenges" component={Challenges} /><Route path="/challenge/:id" component={ChallengeDetail} /><Route path="/leaderboard" component={Leaderboard} /><Route path="/profile" component={Profile} /><Route component={NotFound} /></Switch>; }
+function Router() { return <Switch><Route path="/" component={Home} /><Route path="/daily" component={Daily} /><Route path="/create" component={Create} /><Route path="/receipts" component={MyReceipts} /><Route path="/receipt/:id" component={ReceiptDetail} /><Route path="/r/:id" component={ReceiptDetail} /><Route path="/challenges" component={Challenges} /><Route path="/challenge/:id" component={ChallengeDetail} /><Route path="/feed" component={Feed} /><Route path="/u/:username" component={PublicProfile} /><Route path="/leaderboard" component={Leaderboard} /><Route path="/analytics" component={Analytics} /><Route path="/profile" component={Profile} /><Route component={NotFound} /></Switch>; }
 
 // GitHub Pages serves the app from /THE-RECEIPT/, so every route is prefixed
 // with Vite's base path. It is "/" for the normal server build.
