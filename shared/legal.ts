@@ -10,8 +10,9 @@
  *
  *   - any claim of compliance with GDPR, CCPA, COPPA or any other regime
  *   - any certification, audit, accreditation or security guarantee
- *   - any statement about a minimum age, which is a legal question nobody has
- *     answered yet (see AGE_POSITION below)
+ *   - any statement that the 13+ age floor below satisfies COPPA, the UK
+ *     Children's Code, or any other regime. It is a rule this product
+ *     enforces, not a finding about the law.
  *
  * Writing "we comply with" is a claim about a legal state of affairs, not a
  * description of software, and nothing in this repository establishes it.
@@ -62,10 +63,20 @@ export const PRIVACY_POLICY: LegalDocument = {
     {
       heading: "Dreams",
       body: [
-        "Dreams are captured by voice in your browser. The audio is never uploaded and is never stored — speech recognition runs in your browser and only the resulting text is sent to us. If your browser cannot do that, you type it instead, and the same thing is stored.",
+        "Dreams are captured by speaking to your browser. THE RECEIPT never receives your microphone audio and never stores it: the only thing that reaches us is the text, which is what the transcript is. If your browser cannot transcribe, you type it instead and exactly the same thing is stored.",
+        "The transcription itself is done by your browser, not by us — and what your browser does with the audio is between you and it. Some browsers transcribe on the device. Others send the audio to their own vendor (for example Google, for Chrome) under that vendor's privacy policy, not ours. We do not choose this, cannot see it, and receive nothing either way. If that matters to you, type the dream instead of speaking it.",
         "We do not interpret dreams. The application will not tell you what a dream meant, and will never suggest that a dream predicted or caused anything.",
         "A dream's title is generated from the first words of your own transcript. You can rename it. The transcript itself cannot be edited, like every other receipt.",
         "When you delete your account, every dream is deleted outright — not anonymised, not retained in any form.",
+      ],
+    },
+    {
+      heading: "Your archive, and what it hands back",
+      body: [
+        "Everything you write goes into your archive, and searching it is scoped to you. There is no public version of that search: nobody can search your receipts, and no query anybody makes can return a private receipt, a dream, or a receipt moderation has taken down.",
+        "On the anniversary of something you wrote, the app may hand it back to you — at most one a day, and nothing at all on most days. It tells you the date and what you wrote. It does not tell you what it meant, and it will never claim that one thing you wrote caused, predicted or explains another.",
+        "While you are writing, the app may tell you that you have written something similar before. That is a comparison of your own words against your own archive. Dreams are excluded from it on both sides.",
+        "ME TOO writes a new receipt of your own and records which receipt you wrote it after. It is authorship, not a response, and the person you followed sees a count — never who you are, beyond what your own receipt shows.",
       ],
     },
     {
@@ -97,7 +108,7 @@ export const PRIVACY_POLICY: LegalDocument = {
     {
       heading: "Analytics",
       body: [
-        "We record that certain events happened, tied to your account id, from a fixed list of event names. The contents of what you write are not recorded — a dream capture records only its length, never a word of it, and an archive search records that a search happened and how many results it had, never the term you typed.",
+        "We record that certain events happened, tied to your account id, from a fixed list of event names. The contents of what you write are never recorded — a dream capture records the receipt's id and how many characters it was, never a word of it or its title, and an archive search records how many results it returned and whether a filter was on, never the term you typed.",
         "When you delete your account, these rows are kept with your id removed, so counts do not silently change.",
         "If an external analytics script is configured for a deployment, it is named in that deployment's environment. There is none in the source.",
       ],
@@ -111,11 +122,19 @@ export const PRIVACY_POLICY: LegalDocument = {
       ],
     },
     {
+      heading: "Age",
+      body: [
+        "You need to be 13 or older to use THE RECEIPT. That is a rule we set, and this page does not claim it satisfies any particular law.",
+        "We do not ask for your date of birth and we do not verify your age. Asking would mean collecting something about you we have no other use for, and we would rather not hold it.",
+        "If you believe an account belongs to somebody under 13, tell us through the contact below where one is published, and we will close it.",
+      ],
+    },
+    {
       heading: "What this page does not claim",
       body: [
         "It does not claim compliance with any privacy law or regulation, because no such assessment has been done.",
         "It does not claim any certification, audit or security guarantee.",
-        "It does not state a minimum age. That is a legal question that has not been answered for this product, and inventing an answer would be worse than admitting it is open.",
+        "It does not claim that the 13+ age floor below satisfies any particular law. That floor is a rule this product enforces, not a legal finding.",
       ],
     },
   ],
@@ -133,6 +152,14 @@ export const TERMS: LegalDocument = {
       body: [
         "Using THE RECEIPT means accepting what is on this page. If you do not, do not use it.",
         "This is software under active development. It can change, break, or lose data, and it is offered as it is.",
+      ],
+    },
+    {
+      heading: "Age",
+      body: [
+        "You must be at least 13 to use THE RECEIPT. If you are under 13, do not create an account.",
+        "We do not ask your date of birth and we do not check. This is a rule, not a verification system — and it is our rule, not a claim about what any law requires.",
+        "If we learn an account belongs to somebody under 13, we will close it.",
       ],
     },
     {
@@ -184,10 +211,27 @@ export const TERMS: LegalDocument = {
 };
 
 /**
- * The age question, stated as the open decision it is.
+ * The age floor.
  *
- * Shown in the product rather than hidden in a comment, because a product with
- * no stated age floor should at least be honest that it has none yet.
+ * A product rule, chosen conservatively, and deliberately not dressed up as a
+ * legal finding. Thirteen is the lowest floor in common use for a product like
+ * this one; whether it is the right number for a given jurisdiction is a
+ * question for the legal review that has not happened yet.
+ *
+ * What this deliberately is NOT:
+ *
+ *   - a claim that the product is COPPA compliant, or that COPPA does not
+ *     apply. Stating a floor establishes neither.
+ *   - a claim about the UK Children's Code, the GDPR's age of consent (which
+ *     varies by member state), or any other regime.
+ *   - an age *verification* system. Nothing here checks. Collecting a date of
+ *     birth to police a rule we need it for nowhere else would mean holding
+ *     more about people, not less, which is the wrong trade.
  */
-export const AGE_POSITION =
-  "We have not set a minimum age. Doing so properly means checking what actually applies where this is used, and nobody has done that yet — so rather than print a number that sounds official and is not, this says plainly that the question is open.";
+export const MINIMUM_AGE = 13;
+
+/** One sentence, shown where somebody is about to make an account. */
+export const AGE_NOTICE = `You need to be ${MINIMUM_AGE} or older to use THE RECEIPT.`;
+
+/** The longer form, for the legal pages. */
+export const AGE_POLICY = `${AGE_NOTICE} That is a rule we set, not a claim that it satisfies any particular law. We do not ask for your date of birth and we do not verify it — asking would mean holding something about you we have no other use for.`;
