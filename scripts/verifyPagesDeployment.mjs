@@ -13,8 +13,12 @@
  * So this runs after the deployment, fetches the page a visitor would get, and
  * fails the workflow when it is not the application.
  *
- * It names the Jekyll case specifically, because that is the failure this was
- * written after and it is not self-evident from "the page is wrong".
+ * It reports what it received rather than only that something was wrong: a
+ * classification, the status, the content type and an excerpt of the body.
+ * The first time this ran for real, the configuration check ahead of it failed
+ * and skipped this step, which meant the incident report could say the setting
+ * was wrong but not say what a visitor was getting. Evidence beats inference,
+ * so this now always runs and always prints what it saw.
  */
 
 /** How long to keep retrying while the Pages CDN catches up. */
@@ -24,8 +28,22 @@ const DELAY_MS = 10_000;
 const DEMO_MARKER = "the-receipt-static-demo";
 const SERVER_API_PATH = "/api/trpc";
 const MIN_ENTRY_BYTES = 50_000;
+const EXCERPT_CHARS = 700;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The classifications this can return. Written out because "the site is wrong"
+ * is not a finding — which wrong thing it is decides who fixes what.
+ */
+export const CLASSIFICATIONS = {
+  APP: "THE RECEIPT application",
+  STALE_APP: "stale THE RECEIPT deployment",
+  JEKYLL: "old Jekyll/README deployment",
+  NOT_FOUND: "GitHub Pages 404",
+  ERROR: "GitHub Pages error",
+  OTHER: "other",
+};
 
 /**
  * Jekyll's default theme leaves fingerprints. Finding one means the legacy
@@ -36,8 +54,14 @@ function looksLikeJekyll(html) {
   return (
     html.includes("jekyll-theme") ||
     html.includes("/assets/css/style.css") ||
-    /<meta name="generator" content="Jekyll/i.test(html)
+    /<meta name="generator" content="Jekyll/i.test(html) ||
+    html.includes("markdown-body")
   );
+}
+
+/** GitHub's own "there isn't a site here" page, not the project's 404.html. */
+function looksLikePagesNotFound(html) {
+  return html.includes("There isn't a GitHub Pages site here") || html.includes("404.github.com");
 }
 
 async function get(url) {
@@ -46,35 +70,56 @@ async function get(url) {
 }
 
 /**
- * @param {string} siteUrl e.g. https://owner.github.io/THE-RECEIPT/
- * @returns {Promise<string[]>} problems; empty when the live site is the app
+ * Decides what the live document is. `expectedEntry`, when given, is the entry
+ * bundle path this build produced; a live app pointing at a different bundle is
+ * a stale deployment rather than a working one.
  */
-export async function checkLiveSite(siteUrl) {
-  const base = new URL(siteUrl).pathname.endsWith("/") ? siteUrl : `${siteUrl}/`;
+export function classify(index, expectedEntry) {
+  if (index.status >= 500) return CLASSIFICATIONS.ERROR;
+  if (looksLikePagesNotFound(index.body)) return CLASSIFICATIONS.NOT_FOUND;
+  if (looksLikeJekyll(index.body)) return CLASSIFICATIONS.JEKYLL;
+  if (!index.body.includes('id="root"')) {
+    return index.status === 404 ? CLASSIFICATIONS.NOT_FOUND : CLASSIFICATIONS.OTHER;
+  }
+  if (expectedEntry && !index.body.includes(expectedEntry)) return CLASSIFICATIONS.STALE_APP;
+  return CLASSIFICATIONS.APP;
+}
+
+/**
+ * @param {string} siteUrl e.g. https://owner.github.io/THE-RECEIPT/
+ * @param {string} [expectedEntry] the entry bundle path this build produced
+ * @returns {Promise<{classification: string, problems: string[], index: object}>}
+ */
+export async function checkLiveSite(siteUrl, expectedEntry) {
+  const base = siteUrl.endsWith("/") ? siteUrl : `${siteUrl}/`;
   const problems = [];
   const say = (problem) => problems.push(problem);
 
   const index = await get(base);
-  if (index.status !== 200) {
-    say(`GET ${base} returned ${index.status}, not 200.`);
-  }
+  const classification = classify(index, expectedEntry);
 
-  if (looksLikeJekyll(index.body)) {
+  if (classification === CLASSIFICATIONS.JEKYLL) {
     say(
-      `GET ${base} is serving a Jekyll-built page, not this application. That means the repository's Pages source is "Deploy from a branch" rather than "GitHub Actions": GitHub runs its own Jekyll build on every push and deploys it over this workflow's artifact. Fix it at Settings -> Pages -> Build and deployment -> Source -> GitHub Actions.`,
+      `${base} is serving a Jekyll-built page, not this application. The repository's Pages source is "Deploy from a branch" rather than "GitHub Actions": GitHub runs its own Jekyll build on every push and deploys it over this workflow's artifact. Fix it at Settings -> Pages -> Build and deployment -> Source -> GitHub Actions.`,
     );
-    return problems;
+    return { classification, problems, index };
   }
 
-  if (!index.body.includes('id="root"')) {
-    say(`GET ${base} returned a document with no <div id="root"> — whatever is live, it is not this application.`);
-    return problems;
+  if (classification !== CLASSIFICATIONS.APP && classification !== CLASSIFICATIONS.STALE_APP) {
+    say(`${base} returned ${classification} (HTTP ${index.status}, ${index.type || "no content-type"}).`);
+    return { classification, problems, index };
   }
+
+  if (classification === CLASSIFICATIONS.STALE_APP) {
+    say(`${base} is serving THE RECEIPT, but not this build — it does not reference ${expectedEntry}.`);
+  }
+
+  if (index.status !== 200) say(`GET ${base} returned ${index.status}, not 200.`);
 
   const entry = /<script[^>]*type="module"[^>]*src="([^"]+)"/.exec(index.body);
   if (!entry) {
-    say(`GET ${base} returned a document that loads no module script — the application entry point is missing.`);
-    return problems;
+    say(`${base} returned a document that loads no module script — the application entry point is missing.`);
+    return { classification, problems, index };
   }
 
   const entryUrl = new URL(entry[1], base).toString();
@@ -85,7 +130,7 @@ export async function checkLiveSite(siteUrl) {
     if (script.body.length < MIN_ENTRY_BYTES) {
       say(`GET ${entryUrl} returned ${script.body.length} bytes, under ${MIN_ENTRY_BYTES} — that is not the bundle.`);
     }
-    if (script.body.includes("<!doctype html") || script.body.includes("<!DOCTYPE html")) {
+    if (/<!doctype html/i.test(script.body)) {
       say(`GET ${entryUrl} returned HTML, not JavaScript — the asset path is wrong or the assets were not deployed.`);
     }
     if (!script.body.includes(DEMO_MARKER)) {
@@ -103,29 +148,51 @@ export async function checkLiveSite(siteUrl) {
     say(`GET ${base}archive did not return the SPA fallback — deep links and shared receipt URLs are broken.`);
   }
 
-  return problems;
+  return { classification, problems, index };
 }
 
 if (process.argv[1]?.endsWith("verifyPagesDeployment.mjs")) {
-  const siteUrl = process.argv[2];
+  const [siteUrl, expectedEntry] = process.argv.slice(2);
   if (!siteUrl) {
-    console.error("usage: node scripts/verifyPagesDeployment.mjs <url>");
+    console.error("usage: node scripts/verifyPagesDeployment.mjs <url> [expected-entry-path]");
     process.exit(2);
   }
 
-  let problems = [];
+  let result = { classification: CLASSIFICATIONS.OTHER, problems: ["not attempted"], index: null };
   for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
-    problems = await checkLiveSite(siteUrl).catch((error) => [`request failed: ${error.message}`]);
-    if (problems.length === 0) break;
+    result = await checkLiveSite(siteUrl, expectedEntry).catch((error) => ({
+      classification: CLASSIFICATIONS.ERROR,
+      problems: [`request failed: ${error.message}`],
+      index: null,
+    }));
+    if (result.problems.length === 0) break;
+    // A misconfigured Pages source is not going to resolve itself in ten
+    // seconds; only a deployment still propagating is worth waiting for.
+    if (result.classification === CLASSIFICATIONS.JEKYLL) break;
     if (attempt < ATTEMPTS) {
-      console.log(`Attempt ${attempt}/${ATTEMPTS}: not serving the application yet, retrying in ${DELAY_MS / 1000}s.`);
+      console.log(`Attempt ${attempt}/${ATTEMPTS}: got "${result.classification}", retrying in ${DELAY_MS / 1000}s.`);
       await sleep(DELAY_MS);
     }
   }
 
-  if (problems.length > 0) {
-    console.error(`\n${siteUrl} is not serving THE RECEIPT:\n`);
-    for (const problem of problems) console.error(`  - ${problem}`);
+  // Printed whether or not the check passed: the next person reading this log
+  // should not have to guess what a visitor was actually served.
+  console.log(`\n--- what ${siteUrl} actually returned ---`);
+  if (result.index) {
+    console.log(`status:         ${result.index.status}`);
+    console.log(`content-type:   ${result.index.type || "(none)"}`);
+    console.log(`bytes:          ${result.index.body.length}`);
+    console.log(`classification: ${result.classification}`);
+    console.log(`\nfirst ${EXCERPT_CHARS} characters:\n`);
+    console.log(result.index.body.slice(0, EXCERPT_CHARS));
+  } else {
+    console.log(`classification: ${result.classification} (no response captured)`);
+  }
+  console.log(`--- end ---\n`);
+
+  if (result.problems.length > 0) {
+    console.error(`${siteUrl} is not serving THE RECEIPT:\n`);
+    for (const problem of result.problems) console.error(`  - ${problem}`);
     console.error("");
     process.exit(1);
   }

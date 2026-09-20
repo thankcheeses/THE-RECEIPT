@@ -17,6 +17,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      entry: ${{ steps.artifact.outputs.entry }}
     steps:
       - uses: actions/checkout@v4
       # No `version:` here — package.json's `packageManager` field pins pnpm,
@@ -37,7 +39,17 @@ jobs:
       # base path and existing on disk, no unresolved %VITE_% placeholder, and
       # a bundle that talks to localStorage rather than to /api/trpc.
       - name: Verify the static artifact
-        run: node scripts/verifyStaticBuild.mjs dist/public "/${{ github.event.repository.name }}/"
+        id: artifact
+        run: |
+          node scripts/verifyStaticBuild.mjs dist/public "/${{ github.event.repository.name }}/"
+          entry="$(node -e '
+            const html = require("node:fs").readFileSync("dist/public/index.html", "utf8");
+            const match = /<script[^>]*type="module"[^>]*src="([^"]+)"/.exec(html);
+            if (!match) { process.exit(1); }
+            process.stdout.write(match[1]);
+          ')"
+          echo "This build's entry bundle: $entry"
+          echo "entry=$entry" >> "$GITHUB_OUTPUT"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
@@ -61,18 +73,35 @@ jobs:
   # workflow's artifact — replacing the application with a themed render of
   # README.md while every job here still reports success. The only way to know
   # is to ask the live URL what it is serving.
+  #
+  # Both checks below run on every attempt and neither short-circuits the
+  # other. The first version of this job exited on the configuration check,
+  # which skipped the live fetch and left the incident report able to say the
+  # setting was wrong but not what a visitor was actually getting.
   verify:
-    needs: deploy
+    needs: [build, deploy]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Check the Pages source is GitHub Actions
+
+      - name: Read the Pages configuration
+        id: pages_config
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          echo "--- repos/$GITHUB_REPOSITORY/pages ---"
+          gh api "repos/$GITHUB_REPOSITORY/pages" \
+            --jq '{build_type, status, html_url, url, cname, public, source}' || echo "(could not read the Pages configuration)"
+          echo "--- latest legacy (branch-source) Pages build, if any ---"
+          # Only a branch-source site has these. One here means GitHub is
+          # building the repository itself, and its commit says from what.
+          gh api "repos/$GITHUB_REPOSITORY/pages/builds/latest" \
+            --jq '{status, commit, created_at, updated_at, duration}' || echo "(none — consistent with a workflow-source site)"
+          echo "--- verdict ---"
           build_type="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq '.build_type' 2>/dev/null || echo unreadable)"
           echo "Pages build_type: $build_type"
           if [ "$build_type" = "unreadable" ]; then
@@ -81,5 +110,15 @@ jobs:
             echo "::error::Pages build_type is '$build_type', not 'workflow'. GitHub is building and deploying this repository itself, over the top of this workflow. Set Settings -> Pages -> Build and deployment -> Source to 'GitHub Actions'."
             exit 1
           fi
+
       - name: Verify the live site is the application
-        run: node scripts/verifyPagesDeployment.mjs "${{ needs.deploy.outputs.page_url }}"
+        id: live
+        continue-on-error: true
+        run: node scripts/verifyPagesDeployment.mjs "${{ needs.deploy.outputs.page_url }}" "${{ needs.build.outputs.entry }}"
+
+      - name: Fail if either check failed
+        if: steps.pages_config.outcome == 'failure' || steps.live.outcome == 'failure'
+        run: |
+          echo "Pages configuration check: ${{ steps.pages_config.outcome }}"
+          echo "Live site check:           ${{ steps.live.outcome }}"
+          exit 1
