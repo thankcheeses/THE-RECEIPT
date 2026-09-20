@@ -5,13 +5,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Allow the workflow to publish to Pages.
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Let an in-flight deploy finish rather than cancelling it mid-publish.
 concurrency:
   group: pages
   cancel-in-progress: false
@@ -21,27 +19,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       # No `version:` here — package.json's `packageManager` field pins pnpm,
       # and setting both makes the action fail with ERR_PNPM_BAD_PM_VERSION.
       - uses: pnpm/action-setup@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-
       - run: pnpm install --frozen-lockfile
-
       - name: Build static site
-        # The project site lives at https://<owner>.github.io/<repo>/, so every
-        # asset URL needs that prefix.
         run: pnpm build:static
         env:
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
-
+      # A green `vite build` is not the same as a deployable artifact. This
+      # opens the output and checks the things that actually break a Pages
+      # deployment: the SPA fallback, .nojekyll, every asset URL carrying the
+      # base path and existing on disk, no unresolved %VITE_% placeholder, and
+      # a bundle that talks to localStorage rather than to /api/trpc.
+      - name: Verify the static artifact
+        run: node scripts/verifyStaticBuild.mjs dist/public "/${{ github.event.repository.name }}/"
       - uses: actions/configure-pages@v5
-
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist/public
@@ -52,6 +49,37 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # A successful deployment is not the same as a working site. If the
+  # repository's Pages source is "Deploy from a branch", GitHub also runs its
+  # own Jekyll build on every push and publishes it seconds after this
+  # workflow's artifact — replacing the application with a themed render of
+  # README.md while every job here still reports success. The only way to know
+  # is to ask the live URL what it is serving.
+  verify:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the Pages source is GitHub Actions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build_type="$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq '.build_type' 2>/dev/null || echo unreadable)"
+          echo "Pages build_type: $build_type"
+          if [ "$build_type" = "unreadable" ]; then
+            echo "::warning::Could not read the Pages configuration; the live check below is the arbiter."
+          elif [ "$build_type" != "workflow" ]; then
+            echo "::error::Pages build_type is '$build_type', not 'workflow'. GitHub is building and deploying this repository itself, over the top of this workflow. Set Settings -> Pages -> Build and deployment -> Source to 'GitHub Actions'."
+            exit 1
+          fi
+      - name: Verify the live site is the application
+        run: node scripts/verifyPagesDeployment.mjs "${{ needs.deploy.outputs.page_url }}"
