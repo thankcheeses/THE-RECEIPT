@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, like, lt, lte, ne, or, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertUser, users, receipts, dailyChallenges, challenges, achievements, dailyActivity, notifications, analyticsEvents, receiptInteractions, receiptReports, moderationActions, retiredUsernames } from "../drizzle/schema";
 import type { InteractionType } from "@shared/interactionPolicy";
@@ -11,6 +11,14 @@ import {
   type ReportStatus,
 } from "@shared/moderation";
 import { normalizeUsername } from "@shared/accountDeletion";
+import {
+  MAX_RESURFACED_PER_DAY,
+  RESURFACE_YEARS,
+  SIMILARITY_THRESHOLD,
+  parseSearchQuery,
+  similarity,
+  yearsAgoToday,
+} from "@shared/archive";
 import { ENV } from "./_core/env";
 
 const RESOLVED_STATUSES: string[] = ["RIGHT", "WRONG", "PARTIALLY RIGHT"];
@@ -36,7 +44,27 @@ export function publicReceiptWhere(...extra: Array<SQL | undefined>) {
   return and(
     eq(receipts.visibility, "PUBLIC"),
     eq(receipts.moderationStatus, "VISIBLE"),
+    // A dream is never public. It is clamped to PRIVATE when it is written, so
+    // this is the second lock on the same door: even a row whose visibility
+    // was flipped by a bug or by hand cannot reach the feed, a profile, a
+    // shared link, an Open Graph card or a generated image. Every public
+    // surface composes this one condition, so they all close together.
+    or(isNull(receipts.semanticType), ne(receipts.semanticType, "DREAM")),
     ...extra,
+  );
+}
+
+/**
+ * The types reality eventually answers, as a SQL condition.
+ *
+ * MEMORY and DREAM are excluded, and legacy rows with a null semanticType are
+ * included — those were all written by a form that only offered predictions,
+ * which is the same rule `resolveSemanticType` applies when reading them.
+ */
+export function resolvableTypeWhere() {
+  return or(
+    isNull(receipts.semanticType),
+    inArray(receipts.semanticType, ["PREDICTION", "GOAL", "PERSONAL", "FUN"]),
   );
 }
 
@@ -584,6 +612,8 @@ export async function getMeTooCluster(receiptId: number) {
 export function resolvingSoonWhere(now: Date) {
   return publicReceiptWhere(
     inArray(receipts.status, ["PENDING", "LOCKED"]),
+    resolvableTypeWhere(),
+    isNotNull(receipts.resolutionDate),
     gte(receipts.resolutionDate, now),
     isNotNull(receipts.userId),
   );
@@ -688,6 +718,11 @@ export async function syncResolutionNotifications(userId: number, now: Date = ne
         and(
           eq(receipts.userId, userId),
           inArray(receipts.status, [...RESOLVABLE_STATUSES]),
+          // A memory or a dream has no resolution date and is never "due".
+          // Gating on the type here keeps the bell and the resolve guard
+          // agreeing about what can be resolved at all.
+          resolvableTypeWhere(),
+          isNotNull(receipts.resolutionDate),
           lte(receipts.resolutionDate, now),
           isNull(notifications.id),
         ),
@@ -1015,10 +1050,16 @@ export async function deleteAccount(userId: number) {
   // are not this person's to erase. Those are anonymised and stay PRIVATE, so
   // they remain absent from every public surface.
   const ownRows = await db
-    .select({ id: receipts.id, visibility: receipts.visibility })
+    .select({ id: receipts.id, visibility: receipts.visibility, semanticType: receipts.semanticType })
     .from(receipts)
     .where(eq(receipts.userId, userId));
   const privateIds = ownRows.filter((row) => row.visibility === "PRIVATE").map((row) => row.id);
+  // Dreams go unconditionally — not anonymised, not held back, whatever else
+  // points at them and whatever visibility they somehow ended up with. A dream
+  // is the most involuntary thing anyone puts in this app, and "we kept an
+  // anonymous copy" is not an answer somebody who deleted their account would
+  // accept. This is the one place that overrides the retain-and-detach rule.
+  const dreamIds = ownRows.filter((row) => row.semanticType === "DREAM").map((row) => row.id);
   // A private Receipt is kept — detached, and still PRIVATE, so absent from
   // every public surface — when another record depends on it:
   //
@@ -1038,7 +1079,8 @@ export async function deleteAccount(userId: number) {
         ].map((row) => row.id),
       )
     : new Set<number>();
-  const deletableIds = privateIds.filter((id) => !referenced.has(id));
+  const dreamIdSet = new Set(dreamIds);
+  const deletableIds = dreamIds.concat(privateIds.filter((id) => !referenced.has(id) && !dreamIdSet.has(id)));
 
   if (deletableIds.length) {
     // Responses to a Receipt that is about to disappear. Unlike reports and
@@ -1094,7 +1136,166 @@ export async function deleteAccount(userId: number) {
 
   return {
     deletedPrivateReceipts: deletableIds.length,
+    deletedDreams: dreamIds.length,
     anonymizedReceipts: ownRows.length - deletableIds.length,
     usernameRetired: Boolean(user.username),
   };
+}
+
+// ---------------------------------------------------------------------------
+// The archive
+// ---------------------------------------------------------------------------
+
+/**
+ * Receipts a person may search: their own, all of them.
+ *
+ * Archive search is private by construction. It is scoped to one author id and
+ * there is no public variant, so there is no query shape here that could leak
+ * somebody else's private Receipt, their dream, or a Receipt that moderation
+ * has taken down. Hidden Receipts stay searchable *to their own author*, which
+ * matches how the rest of the product treats a takedown: the record is not
+ * destroyed and the author can still see it.
+ */
+function archiveWhere(userId: number, ...extra: Array<SQL | undefined>) {
+  return and(eq(receipts.userId, userId), ...extra);
+}
+
+/** `%` and `_` are wildcards in LIKE; a person searching for them means them. */
+function escapeLike(term: string) {
+  return term.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+export const ARCHIVE_PAGE_SIZE = 20;
+
+/**
+ * Text search over your own archive.
+ *
+ * Plain LIKE matching, on purpose. The first version of search against your
+ * own memory has to be predictable: if you know you wrote the word "Brooklyn",
+ * searching "Brooklyn" must find it, every time. Ranking heuristics and
+ * semantic matching both trade that away for recall nobody asked for.
+ *
+ * Every term must match somewhere in the Receipt (AND, not OR), across its
+ * text, its title and any resolution note.
+ */
+export async function searchMyReceipts(options: {
+  userId: number;
+  query?: string;
+  semanticType?: string;
+  status?: string;
+  cursor?: number;
+  limit?: number;
+}) {
+  const limit = Math.min(Math.max(options.limit ?? ARCHIVE_PAGE_SIZE, 1), 50);
+  const db = await getDb();
+  if (!db) return { items: [], nextCursor: null as number | null };
+
+  const filters: Array<SQL | undefined> = [];
+  for (const term of parseSearchQuery(options.query ?? "")) {
+    const pattern = `%${escapeLike(term)}%`;
+    filters.push(or(like(receipts.prediction, pattern), like(receipts.title, pattern), like(receipts.result, pattern)));
+  }
+  if (options.semanticType) filters.push(eq(receipts.semanticType, options.semanticType as "PREDICTION"));
+  if (options.status) filters.push(eq(receipts.status, options.status as "PENDING"));
+  if (options.cursor) filters.push(lt(receipts.id, options.cursor));
+
+  const rows = await db
+    .select()
+    .from(receipts)
+    .where(archiveWhere(options.userId, ...filters))
+    .orderBy(desc(receipts.id))
+    .limit(limit + 1);
+
+  const items = rows.slice(0, limit);
+  return {
+    items,
+    nextCursor: rows.length > limit ? (items[items.length - 1]?.id ?? null) : null,
+  };
+}
+
+/** How many Receipts of each type this person has. Drives the archive filters. */
+export async function archiveTypeCounts(userId: number) {
+  const db = await getDb();
+  if (!db) return [] as Array<{ semanticType: string | null; total: number }>;
+  const rows = await db
+    .select({ semanticType: receipts.semanticType, total: count() })
+    .from(receipts)
+    .where(eq(receipts.userId, userId))
+    .groupBy(receipts.semanticType);
+  return rows.map((row) => ({ semanticType: row.semanticType, total: Number(row.total) || 0 }));
+}
+
+/**
+ * The Receipt to hand back to somebody today, if there is one worth handing.
+ *
+ * Two ways a Receipt earns its way back:
+ *
+ *  1. It is an anniversary — you wrote it a year ago today, to the day.
+ *  2. You just wrote something you have written before.
+ *
+ * What this never does is claim a relationship between them beyond the one it
+ * can prove. It says "you wrote something similar", which is a fact about your
+ * archive. It does not say one receipt predicted, caused or explains another,
+ * and it must never say so about a dream.
+ */
+export async function getResurfaced(userId: number, now: Date = new Date()) {
+  const db = await getDb();
+  if (!db) return null;
+
+  const oldest = new Date(now);
+  oldest.setFullYear(oldest.getFullYear() - Math.max(...RESURFACE_YEARS) - 1);
+
+  const candidates = await db
+    .select()
+    .from(receipts)
+    .where(archiveWhere(userId, lt(receipts.createdAt, startOfDay(now)), gte(receipts.createdAt, oldest)))
+    .orderBy(desc(receipts.createdAt))
+    .limit(500);
+
+  for (const years of RESURFACE_YEARS) {
+    const match = candidates.find((receipt) => yearsAgoToday(new Date(receipt.createdAt), now) === years);
+    if (match) return { kind: "ANNIVERSARY" as const, years, receipt: match, similarTo: null };
+  }
+  return null;
+}
+
+/**
+ * Something this person already wrote that reads like what they are writing now.
+ *
+ * Called while composing, so it can say "you wrote this before" *before* the
+ * new Receipt is locked rather than after. Dreams are excluded from both sides:
+ * a dream is never offered as a precedent for a waking claim, because that is
+ * one short step from telling somebody their dream predicted something.
+ */
+export async function findSimilarInArchive(userId: number, text: string, excludeId?: number) {
+  const db = await getDb();
+  if (!db) return null;
+  if (!text.trim()) return null;
+
+  const rows = await db
+    .select()
+    .from(receipts)
+    .where(
+      archiveWhere(
+        userId,
+        ne(receipts.semanticType, "DREAM"),
+        excludeId ? ne(receipts.id, excludeId) : undefined,
+      ),
+    )
+    .orderBy(desc(receipts.id))
+    .limit(300);
+
+  let best: { receipt: (typeof rows)[number]; score: number } | null = null;
+  for (const receipt of rows) {
+    const score = similarity(text, receipt.prediction);
+    if (score >= SIMILARITY_THRESHOLD && (!best || score > best.score)) best = { receipt, score };
+  }
+  return best && { kind: "SIMILAR" as const, score: best.score, receipt: best.receipt, years: null };
+}
+
+/** The archive at a glance: what is in it, and what is still open. */
+export async function archiveSummary(userId: number) {
+  const counts = await archiveTypeCounts(userId);
+  const total = counts.reduce((sum, row) => sum + row.total, 0);
+  return { total, byType: counts, maxPerDay: MAX_RESURFACED_PER_DAY };
 }

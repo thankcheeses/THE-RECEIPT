@@ -16,8 +16,17 @@
  */
 import type { Category } from "./seed";
 
-export const SEMANTIC_TYPES = ["PREDICTION", "GOAL", "PERSONAL", "FUN"] as const;
+export const SEMANTIC_TYPES = ["PREDICTION", "GOAL", "PERSONAL", "FUN", "MEMORY", "DREAM"] as const;
 export type SemanticType = (typeof SEMANTIC_TYPES)[number];
+
+/**
+ * The types a person can pick when writing an ordinary Receipt.
+ *
+ * DREAM is absent on purpose: it is not written, it is captured, and it has
+ * its own entry point. Offering it in the compose form would produce dreams
+ * that were typed out hours later, which is the opposite of what it is for.
+ */
+export const COMPOSABLE_TYPES = ["PREDICTION", "GOAL", "PERSONAL", "FUN", "MEMORY"] as const;
 
 /** The words shown to people. Database names never reach the UI. */
 export const SEMANTIC_TYPE_COPY: Record<SemanticType, { label: string; blurb: string }> = {
@@ -25,9 +34,17 @@ export const SEMANTIC_TYPE_COPY: Record<SemanticType, { label: string; blurb: st
   GOAL: { label: "Goal", blurb: "I'm putting a personal goal on the record." },
   PERSONAL: { label: "Personal", blurb: "I'm predicting something about my own life." },
   FUN: { label: "Fun", blurb: "This is ridiculous, funny, weird, or just for fun." },
+  MEMORY: { label: "Memory", blurb: "Something just happened. I don't know yet what it will mean." },
+  DREAM: { label: "Dream", blurb: "I just woke up and I want it down before it goes." },
 };
 
 /** Interactions that are recorded against a Receipt, one per person. */
+/**
+ * REACT is retired: no type offers it any more, so nothing new is recorded
+ * under it. It stays here, and in the database enum, because the rows already
+ * written under it are responses real people made and are still displayed.
+ * Deleting the name would orphan them.
+ */
 export const INTERACTION_TYPES = ["AGREE", "DISAGREE", "SUPPORT", "REACT"] as const;
 export type InteractionType = (typeof INTERACTION_TYPES)[number];
 
@@ -48,10 +65,57 @@ const POLICY: Record<SemanticType, readonly InteractionType[]> = {
   PREDICTION: ["AGREE", "DISAGREE"],
   GOAL: ["SUPPORT"],
   PERSONAL: ["SUPPORT"],
-  // Kept to a single unnamed reaction on purpose. A reaction vocabulary is its
-  // own design problem and is not being decided here.
-  FUN: ["REACT"],
+  // A silly claim is still a claim: "my cat knocks over exactly three glasses
+  // this week" is answered by reality like anything else, so FUN takes the
+  // same responses a prediction does.
+  //
+  // It used to offer a single unnamed REACT. That was a like wearing a
+  // different name — the one thing this product has consistently refused to
+  // build — and the alternative on the table, a named reaction vocabulary, is
+  // the same thing with more buttons. So the reaction is retired rather than
+  // expanded. REACT stays in the vocabulary below and in the database because
+  // rows recorded under it are real responses people made and are still
+  // counted; nothing new is written under it.
+  FUN: ["AGREE", "DISAGREE"],
+  // A memory is not a claim, so there is nothing to agree or disagree with,
+  // and "support" would be answering a question nobody asked. ME TOO still
+  // works: writing your own memory after someone else's is authorship.
+  MEMORY: [],
+  // Structurally interaction-free. Not "we did not build the buttons" — the
+  // server refuses every interaction against a dream, so no surface can add
+  // one later by accident.
+  DREAM: [],
 };
+
+/**
+ * Types whose Receipts are answered by reality, and so can be resolved
+ * RIGHT / WRONG / PARTIALLY RIGHT / TOO EARLY.
+ *
+ * MEMORY and DREAM are not in this list and that is the whole point. A memory
+ * is not right or wrong, and neither is a dream. The existing resolution
+ * vocabulary cannot describe what either of them came to mean, so they are not
+ * forced through it — they are locked, kept, and resurfaced instead. See
+ * `isResolvableType` below for the single check every resolution path uses.
+ */
+const RESOLVABLE_TYPES: readonly SemanticType[] = ["PREDICTION", "GOAL", "PERSONAL", "FUN"];
+
+/** Whether reality ever answers a Receipt of this type. */
+export function isResolvableType(value: string | null | undefined): boolean {
+  return RESOLVABLE_TYPES.includes(resolveSemanticType(value));
+}
+
+/**
+ * Types that may never be made public, whatever the author picks.
+ *
+ * A dream is the most involuntary thing a person will ever put in this app.
+ * It is private at rest, and the server clamps it rather than trusting a
+ * visibility field that arrived over the wire.
+ */
+const PRIVATE_ONLY_TYPES: readonly SemanticType[] = ["DREAM"];
+
+export function isPrivateOnlyType(value: string | null | undefined): boolean {
+  return PRIVATE_ONLY_TYPES.includes(resolveSemanticType(value));
+}
 
 /**
  * Receipts written before semantic types existed have none stored. Every one of

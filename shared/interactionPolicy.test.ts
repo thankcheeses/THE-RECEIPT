@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  COMPOSABLE_TYPES,
   INTERACTION_TYPES,
   LEGACY_SEMANTIC_TYPE,
   SEMANTIC_TYPES,
@@ -8,12 +9,22 @@ import {
   allowsInteraction,
   defaultSemanticTypeFor,
   interactionsFor,
+  isPrivateOnlyType,
+  isResolvableType,
   resolveSemanticType,
 } from "./interactionPolicy";
 
 describe("semantic types", () => {
-  it("offers exactly the four author-selectable kinds", () => {
-    expect([...SEMANTIC_TYPES]).toEqual(["PREDICTION", "GOAL", "PERSONAL", "FUN"]);
+  it("knows six kinds of receipt", () => {
+    expect([...SEMANTIC_TYPES]).toEqual(["PREDICTION", "GOAL", "PERSONAL", "FUN", "MEMORY", "DREAM"]);
+  });
+
+  it("offers five of them in the compose form, never DREAM", () => {
+    // A dream is captured on waking, through its own entrance. Offering it as
+    // a dropdown option would produce dreams typed out hours later, which is
+    // the opposite of what the type is for.
+    expect([...COMPOSABLE_TYPES]).toEqual(["PREDICTION", "GOAL", "PERSONAL", "FUN", "MEMORY"]);
+    expect(COMPOSABLE_TYPES as readonly string[]).not.toContain("DREAM");
   });
 
   it("gives every type human-readable copy, never a database name", () => {
@@ -41,8 +52,21 @@ describe("interaction policy", () => {
     expect(allowsInteraction("PERSONAL", "DISAGREE")).toBe(false);
   });
 
-  it("gives fun receipts a single reaction and no vocabulary to argue about", () => {
-    expect([...interactionsFor("FUN")]).toEqual(["REACT"]);
+  it("treats a silly claim as a claim", () => {
+    // FUN used to offer one unnamed REACT. That was a like wearing a different
+    // name, and the alternative on the table — a named reaction vocabulary —
+    // is the same thing with more buttons. "My cat knocks over exactly three
+    // glasses this week" is answered by reality like anything else, so it
+    // takes the responses a prediction takes.
+    expect([...interactionsFor("FUN")]).toEqual(["AGREE", "DISAGREE"]);
+  });
+
+  it("offers REACT on nothing any more, while keeping the name for old rows", () => {
+    // Nothing new is recorded under it. The name stays in the vocabulary and
+    // in the database because the rows already written under it are responses
+    // real people made, and they are still counted and displayed.
+    for (const type of SEMANTIC_TYPES) expect(interactionsFor(type)).not.toContain("REACT");
+    expect(INTERACTION_TYPES).toContain("REACT");
   });
 
   it("keeps SUPPORT and AGREE as distinct interactions", () => {
@@ -60,8 +84,24 @@ describe("interaction policy", () => {
     }
   });
 
-  it("offers at least one interaction for every type, so no receipt is inert", () => {
-    for (const type of SEMANTIC_TYPES) expect(interactionsFor(type).length).toBeGreaterThan(0);
+  it("offers at least one interaction for every type reality answers", () => {
+    // A claim about the world is something other people can respond to, and
+    // every one of those types must offer a way to do it.
+    for (const type of SEMANTIC_TYPES.filter(isResolvableType)) {
+      expect(interactionsFor(type).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("offers none at all on a memory or a dream", () => {
+    // Not an omission. There is nothing to agree or disagree with in either,
+    // and the server refuses every interaction against them, so no surface can
+    // quietly add one later.
+    expect(interactionsFor("MEMORY")).toEqual([]);
+    expect(interactionsFor("DREAM")).toEqual([]);
+    for (const interaction of ["AGREE", "DISAGREE", "SUPPORT", "REACT"]) {
+      expect(allowsInteraction("MEMORY", interaction)).toBe(false);
+      expect(allowsInteraction("DREAM", interaction)).toBe(false);
+    }
   });
 });
 
@@ -95,7 +135,7 @@ describe("category defaults", () => {
   it("does not let a category determine the answer, only the starting point", () => {
     // The same category must be able to carry every type — that is the whole
     // reason the author chooses.
-    for (const type of SEMANTIC_TYPES) {
+    for (const type of SEMANTIC_TYPES.filter(isResolvableType)) {
       expect(allowsInteraction(type, interactionsFor(type)[0])).toBe(true);
     }
   });

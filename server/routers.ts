@@ -1,6 +1,8 @@
 import { COOKIE_NAME } from "@shared/const";
-import { CATEGORIES, DAILY_PROMPTS, getTodayPrompt, formatReceiptNumber } from "@shared/seed";
-import { INTERACTION_TYPES, SEMANTIC_TYPES, allowsInteraction, defaultSemanticTypeFor, resolveSemanticType } from "@shared/interactionPolicy";
+import { CATEGORIES, DAILY_PROMPTS, formatReceiptNumber } from "@shared/seed";
+import { PROMPT_STANDARD, isBlocked, screenPrompt } from "@shared/promptReview";
+import { COMPOSABLE_TYPES, INTERACTION_TYPES, SEMANTIC_TYPES, allowsInteraction, defaultSemanticTypeFor, isPrivateOnlyType, isResolvableType, resolveSemanticType } from "@shared/interactionPolicy";
+import { DREAM_MAX_LENGTH, DREAM_MIN_LENGTH, DREAM_TITLE_MAX_LENGTH, dreamTitleFrom } from "@shared/dream";
 import { MAX_REPORT_DETAIL, MODERATION_ACTIONS, REPORT_REASONS, REPORT_STATUSES } from "@shared/moderation";
 import { USERNAME_UNAVAILABLE } from "@shared/accountDeletion";
 import { and, desc, eq } from "drizzle-orm";
@@ -10,10 +12,13 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { challenges, dailyChallenges, receipts, users } from "../drizzle/schema";
-import { getMeTooCluster, RESOLVABLE_STATUSES, syncResolutionNotifications, deleteAccount, isUsernameAvailable, applyModerationAction, countOpenReports, createReceiptReport, getReportByReporter, getReportQueue, listModerationActions, canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent } from "./db";
+import { getMeTooCluster, RESOLVABLE_STATUSES, syncResolutionNotifications, deleteAccount, isUsernameAvailable, applyModerationAction, countOpenReports, createReceiptReport, getReportByReporter, getReportQueue, listModerationActions, canResolveAt, clearInteraction, countUnreadNotifications, createNotification, getInteractionCounts, getResolvingSoon, getViewerInteraction, recordUserReturn, setInteraction, getChallengeById, getDailyActivityWindow, getDb, getDailyChallengeForDate, getEventTotals, getProfileStats, getPublicReceipt, getRecentPublicReceipts, getReceiptById, getPublicFeed, getPublicProfileStats, getRetentionSummary, getUserById, getUserByUsername, listPublicReceiptsForUser, toPublicUser, listChallengesForUser, listNotifications, listReceiptsForUser, markNotificationsRead, recordAchievement, recordDailyActivity, trackEvent, ARCHIVE_PAGE_SIZE, archiveSummary, findSimilarInArchive, getResurfaced, searchMyReceipts } from "./db";
 
 const categorySchema = z.enum(CATEGORIES);
 const semanticTypeSchema = z.enum(SEMANTIC_TYPES);
+// What the compose form may ask for. DREAM is captured through its own route
+// and is not a thing you can select your way into.
+const composableTypeSchema = z.enum(COMPOSABLE_TYPES);
 const interactionSchema = z.enum(INTERACTION_TYPES);
 const statusSchema = z.enum(["RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]);
 const reportReasonSchema = z.enum(REPORT_REASONS);
@@ -33,22 +38,36 @@ export const ANALYTICS_EVENTS = [
   "challenge_created",
   "challenge_accepted",
   "streak_milestone",
+  "archive_searched",
+  "receipt_resurfaced",
+  "dream_captured",
 ] as const;
 const analyticsEventSchema = z.enum(ANALYTICS_EVENTS);
 
-async function ensureDailyChallenge() {
-  const now = new Date();
-  const existing = await getDailyChallengeForDate(now);
-  if (existing) return existing;
-  const db = await getDb();
-  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
-  const prompt = getTodayPrompt();
-  const publishDate = new Date(now);
-  publishDate.setHours(0, 0, 0, 0);
-  const resolutionDate = new Date(publishDate);
-  resolutionDate.setDate(resolutionDate.getDate() + prompt.resolutionDays);
-  const inserted = await db.insert(dailyChallenges).values({ prompt: prompt.prompt, category: prompt.category, publishDate, resolutionDate, status: "OPEN" });
-  return { id: Number(inserted[0].insertId), prompt: prompt.prompt, category: prompt.category, publishDate, resolutionDate, status: "OPEN" as const, createdAt: now };
+/**
+ * Today's prompt, if a person has approved one.
+ *
+ * This used to publish a prompt on first read, which meant whatever the
+ * rotation produced went live to everybody without anyone having looked at it.
+ * Now nothing is served that an administrator has not approved: no approved
+ * prompt means no prompt today, which is the honest outcome of a review gate
+ * and is handled as an empty state rather than an error.
+ */
+async function openDailyChallenge() {
+  const existing = await getDailyChallengeForDate(new Date());
+  return existing && existing.status === "OPEN" ? existing : null;
+}
+
+/** The same, for the paths that genuinely cannot proceed without one. */
+async function requireDailyChallenge() {
+  const daily = await openDailyChallenge();
+  if (!daily) {
+    throw new TRPCError({
+      code: "NOT_FOUND",
+      message: "There's no prompt today. Write your own receipt instead.",
+    });
+  }
+  return daily;
 }
 
 export const appRouter = router({
@@ -68,11 +87,11 @@ export const appRouter = router({
   }),
 
   daily: router({
-    get: publicProcedure.query(async () => ensureDailyChallenge()),
+    get: publicProcedure.query(() => openDailyChallenge()),
     answer: protectedProcedure.input(z.object({ answer: z.enum(["YES", "NO"]), confidence: z.number().int().min(0).max(100) })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
-      const daily = await ensureDailyChallenge();
+      const daily = await requireDailyChallenge();
       const existing = await db.select().from(receipts).where(and(eq(receipts.userId, ctx.user.id), eq(receipts.dailyChallengeId, daily.id))).limit(1);
       if (existing[0]) return existing[0];
       const result = await db.insert(receipts).values({ userId: ctx.user.id, prediction: `${input.answer} — ${daily.prompt}`, category: daily.category, confidence: input.confidence, resolutionDate: daily.resolutionDate, status: "LOCKED", visibility: "PUBLIC", dailyChallengeId: daily.id });
@@ -85,10 +104,10 @@ export const appRouter = router({
     }),
     /** Streak + last-7-days activity for the daily page's header and dots. */
     status: protectedProcedure.query(async ({ ctx }) => {
-      const daily = await ensureDailyChallenge();
+      const daily = await openDailyChallenge();
       const user = (await getUserById(ctx.user.id)) ?? ctx.user;
       const db = await getDb();
-      const answered = db
+      const answered = db && daily
         ? (await db.select().from(receipts).where(and(eq(receipts.userId, ctx.user.id), eq(receipts.dailyChallengeId, daily.id))).limit(1))[0] ?? null
         : null;
       return {
@@ -166,8 +185,17 @@ export const appRouter = router({
         return { counts: await getInteractionCounts(input.id), mine: input.type };
       }),
     mine: protectedProcedure.query(({ ctx }) => listReceiptsForUser(ctx.user.id)),
-    create: protectedProcedure.input(z.object({ prediction: z.string().trim().min(8).max(280), category: categorySchema, resolutionDate: z.coerce.date(), confidence: z.number().int().min(0).max(100), visibility: z.enum(["PUBLIC", "PRIVATE"]).default("PUBLIC"), challengeUsername: z.string().trim().max(40).optional(), semanticType: semanticTypeSchema.optional(), derivedFromId: z.number().int().positive().optional() })).mutation(async ({ ctx, input }) => {
-      if (input.resolutionDate.getTime() <= Date.now()) throw new TRPCError({ code: "BAD_REQUEST", message: "Resolution date must be in the future." });
+    create: protectedProcedure.input(z.object({ prediction: z.string().trim().min(8).max(280), category: categorySchema, resolutionDate: z.coerce.date().optional(), confidence: z.number().int().min(0).max(100), visibility: z.enum(["PUBLIC", "PRIVATE"]).default("PUBLIC"), challengeUsername: z.string().trim().max(40).optional(), semanticType: composableTypeSchema.optional(), derivedFromId: z.number().int().positive().optional() })).mutation(async ({ ctx, input }) => {
+      const semanticType = input.semanticType ?? defaultSemanticTypeFor(input.category);
+      // A memory is not answered by reality, so it carries no resolution date
+      // and none is asked for. Everything else must name the day it can be
+      // checked — that date is the entire point of writing it down.
+      const resolvable = isResolvableType(semanticType);
+      if (resolvable && !input.resolutionDate) throw new TRPCError({ code: "BAD_REQUEST", message: "Pick the date this can be checked." });
+      if (resolvable && input.resolutionDate!.getTime() <= Date.now()) throw new TRPCError({ code: "BAD_REQUEST", message: "Resolution date must be in the future." });
+      const resolutionDate = resolvable ? input.resolutionDate! : null;
+      // A private-only type is clamped here rather than trusted from the wire.
+      const visibility = isPrivateOnlyType(semanticType) ? "PRIVATE" : input.visibility;
       if (input.challengeUsername && input.challengeUsername.toLowerCase() === (ctx.user.username ?? "").toLowerCase()) throw new TRPCError({ code: "BAD_REQUEST", message: "Challenge someone else, not yourself." });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
@@ -183,7 +211,7 @@ export const appRouter = router({
         const parent = await getPublicReceipt(input.derivedFromId);
         if (parent?.receipt) derivedFromId = parent.receipt.id;
       }
-      const result = await db.insert(receipts).values({ userId: ctx.user.id, prediction: input.prediction, category: input.category, confidence: input.confidence, resolutionDate: input.resolutionDate, status: "PENDING", visibility: input.visibility, challengeUserId: challengedUser?.id, semanticType: input.semanticType ?? defaultSemanticTypeFor(input.category), derivedFromId });
+      const result = await db.insert(receipts).values({ userId: ctx.user.id, prediction: input.prediction, category: input.category, confidence: input.confidence, resolutionDate, status: "PENDING", visibility, challengeUserId: challengedUser?.id, semanticType, derivedFromId });
       const receiptId = Number(result[0].insertId);
       if (challengedUser) {
         const inserted = await db.insert(challenges).values({ receiptId, challengerId: ctx.user.id, challengedId: challengedUser.id, challengerPosition: input.prediction, challengerConfidence: input.confidence, status: "OPEN" });
@@ -203,7 +231,7 @@ export const appRouter = router({
       await recordAchievement(ctx.user.id, "CALLER");
       const receipt = await getReceiptById(receiptId);
       if (!receipt) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Receipt was not created" });
-      await trackEvent("receipt_created", ctx.user.id, { receiptId, category: input.category, confidence: input.confidence, visibility: input.visibility, challenged: Boolean(challengedUser), semanticType: input.semanticType ?? defaultSemanticTypeFor(input.category), derived: Boolean(derivedFromId) });
+      await trackEvent("receipt_created", ctx.user.id, { receiptId, category: input.category, confidence: input.confidence, visibility, challenged: Boolean(challengedUser), semanticType, derived: Boolean(derivedFromId) });
       return receipt;
     }),
     resolve: protectedProcedure.input(z.object({ id: z.number().int().positive(), result: statusSchema, note: z.string().trim().max(280).optional() })).mutation(async ({ ctx, input }) => {
@@ -212,6 +240,12 @@ export const appRouter = router({
       const receipt = await getReceiptById(input.id);
       if (!receipt || receipt.userId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "You can only resolve your own receipts." });
       if (!(RESOLVABLE_STATUSES as readonly string[]).includes(receipt.status)) throw new TRPCError({ code: "BAD_REQUEST", message: "This receipt is already resolved." });
+      // Memories and dreams are never right or wrong. Refusing here rather
+      // than only hiding the buttons is what makes that a property of the
+      // product instead of a property of one screen.
+      if (!isResolvableType(receipt.semanticType) || !receipt.resolutionDate) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: `A ${resolveSemanticType(receipt.semanticType).toLowerCase()} receipt isn't right or wrong. It's just kept.` });
+      }
       if (!canResolveAt(receipt.resolutionDate)) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -225,6 +259,194 @@ export const appRouter = router({
       await trackEvent("receipt_resolved", ctx.user.id, { receiptId: input.id, result: input.result, confidence: receipt.confidence, category: receipt.category });
       return getReceiptById(input.id);
     }),
+  }),
+
+  /**
+   * Daily prompt review.
+   *
+   * Every route here is admin-only, and the approval is the point: a prompt
+   * reaches everybody at once, so a person signs off on it with their account
+   * attached before anybody sees it. `screenPrompt` narrows what the reviewer
+   * has to read carefully; it does not approve anything and cannot.
+   */
+  promptReview: router({
+    /** Candidate prompts, screened, plus whatever is already scheduled. */
+    queue: adminProcedure.query(async () => {
+      const db = await getDb();
+      const scheduled = db
+        ? await db.select().from(dailyChallenges).orderBy(desc(dailyChallenges.publishDate)).limit(30)
+        : [];
+      const used = new Set(scheduled.map((row) => row.prompt));
+      const candidates = DAILY_PROMPTS.filter((item) => !used.has(item.prompt)).map((item) => ({
+        ...item,
+        flags: screenPrompt({ prompt: item.prompt, resolutionDays: item.resolutionDays }),
+      }));
+      return {
+        scheduled: scheduled.map((row) => ({ ...row, flags: screenPrompt({ prompt: row.prompt }) })),
+        candidates,
+        standard: PROMPT_STANDARD,
+      };
+    }),
+    /** Puts a candidate in the queue as a draft. It is not live yet. */
+    schedule: adminProcedure
+      .input(z.object({ prompt: z.string().trim().min(1).max(280), category: categorySchema, resolutionDays: z.number().int().min(1).max(60), publishDate: z.coerce.date() }))
+      .mutation(async ({ input }) => {
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
+        const flags = screenPrompt({ prompt: input.prompt, resolutionDays: input.resolutionDays });
+        // A blocked subject is not something a reviewer can wave through: the
+        // prompt has to change, not the decision about it.
+        if (isBlocked(flags)) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: `That prompt is off-limits: ${flags[0].note}` });
+        }
+        const publishDate = new Date(input.publishDate);
+        publishDate.setHours(0, 0, 0, 0);
+        const resolutionDate = new Date(publishDate);
+        resolutionDate.setDate(resolutionDate.getDate() + input.resolutionDays);
+        const inserted = await db.insert(dailyChallenges).values({
+          prompt: input.prompt,
+          category: input.category,
+          publishDate,
+          resolutionDate,
+          status: "DRAFT",
+        });
+        return { id: Number(inserted[0].insertId), flags };
+      }),
+    /** A person signs it off. Their id is recorded against it. */
+    approve: adminProcedure
+      .input(z.object({ id: z.number().int().positive(), note: z.string().trim().max(280).optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
+        const rows = await db.select().from(dailyChallenges).where(eq(dailyChallenges.id, input.id)).limit(1);
+        const draft = rows[0];
+        if (!draft) throw new TRPCError({ code: "NOT_FOUND", message: "No prompt with that id." });
+        if (draft.status !== "DRAFT") throw new TRPCError({ code: "BAD_REQUEST", message: "Only a draft can be approved." });
+        // Re-screened at the moment of approval rather than trusting the check
+        // done when it was scheduled — the text could have been edited since.
+        if (isBlocked(screenPrompt({ prompt: draft.prompt }))) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "That prompt is off-limits and cannot be approved." });
+        }
+        await db
+          .update(dailyChallenges)
+          .set({ status: "OPEN", approvedBy: ctx.user.id, approvedAt: new Date(), reviewNote: input.note ?? null })
+          .where(eq(dailyChallenges.id, input.id));
+        return { id: input.id, status: "OPEN" as const };
+      }),
+    /** Turned down, with a reason. The row stays, so the decision is on record. */
+    reject: adminProcedure
+      .input(z.object({ id: z.number().int().positive(), note: z.string().trim().min(1).max(280) }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
+        await db
+          .update(dailyChallenges)
+          .set({ status: "REJECTED", approvedBy: ctx.user.id, approvedAt: new Date(), reviewNote: input.note })
+          .where(eq(dailyChallenges.id, input.id));
+        return { id: input.id, status: "REJECTED" as const };
+      }),
+  }),
+
+  /**
+   * The archive. Everything here is scoped to the caller's own Receipts —
+   * there is no public variant of any of it, which is what keeps a private
+   * Receipt, a hidden one, or a dream from reaching anybody else through
+   * search.
+   */
+  archive: router({
+    search: protectedProcedure
+      .input(
+        z.object({
+          query: z.string().trim().max(120).optional(),
+          semanticType: semanticTypeSchema.optional(),
+          status: z.enum(["PENDING", "LOCKED", "RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]).optional(),
+          cursor: z.number().int().positive().optional(),
+          limit: z.number().int().min(1).max(50).optional(),
+        }).optional(),
+      )
+      .query(async ({ ctx, input }) => {
+        const page = await searchMyReceipts({ userId: ctx.user.id, ...(input ?? {}) });
+        // The term itself is never recorded: it is the contents of somebody's
+        // private archive. Only that a search happened, and how well it did.
+        if (input?.query) await trackEvent("archive_searched", ctx.user.id, { results: page.items.length, filtered: Boolean(input.semanticType || input.status) });
+        return page;
+      }),
+    summary: protectedProcedure.query(({ ctx }) => archiveSummary(ctx.user.id)),
+    /**
+     * The one Receipt worth handing back today, or nothing.
+     *
+     * Returning null is the common case and is not a failure. An archive that
+     * produces something every single day is a feed.
+     */
+    resurfaced: protectedProcedure.query(async ({ ctx }) => {
+      const found = await getResurfaced(ctx.user.id);
+      if (found) await trackEvent("receipt_resurfaced", ctx.user.id, { kind: found.kind, years: found.years });
+      return found;
+    }),
+    /**
+     * Something like this, already in your archive. Read while composing, so
+     * it can be shown before the new Receipt is locked rather than after.
+     */
+    similar: protectedProcedure
+      .input(z.object({ text: z.string().trim().max(280), excludeId: z.number().int().positive().optional() }))
+      .query(({ ctx, input }) => findSimilarInArchive(ctx.user.id, input.text, input.excludeId)),
+  }),
+
+  /**
+   * Dreams.
+   *
+   * Capture is its own route rather than a flag on `receipts.create` because
+   * the rules are genuinely different: no resolution date, no confidence to
+   * speak of, no visibility choice, no interactions, and a title derived from
+   * the transcript. Folding it into the general path would mean a stack of
+   * conditionals where a missed one leaks a dream onto a public surface.
+   */
+  dreams: router({
+    capture: protectedProcedure
+      .input(z.object({ transcript: z.string().trim().min(DREAM_MIN_LENGTH).max(DREAM_MAX_LENGTH), title: z.string().trim().max(DREAM_TITLE_MAX_LENGTH).optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
+        const inserted = await db.insert(receipts).values({
+          userId: ctx.user.id,
+          prediction: input.transcript,
+          title: input.title?.trim() || dreamTitleFrom(input.transcript),
+          category: "LIFE",
+          // A dream is not a claim, so there is nothing to be confident about.
+          // Stored as zero rather than inventing a number to display.
+          confidence: 0,
+          // Nothing answers a dream. See isResolvableType.
+          resolutionDate: null,
+          status: "PENDING",
+          // Not read from input at all: there is no code path by which a dream
+          // becomes public.
+          visibility: "PRIVATE",
+          semanticType: "DREAM",
+        });
+        const receiptId = Number(inserted[0].insertId);
+        // Length only. The transcript is the most private thing in the app and
+        // no part of it, and no derived summary of it, goes to analytics.
+        await trackEvent("dream_captured", ctx.user.id, { receiptId, length: input.transcript.length });
+        const receipt = await getReceiptById(receiptId);
+        if (!receipt) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Dream was not saved" });
+        return receipt;
+      }),
+    /**
+     * Renames a dream. The title is a label on the record; the transcript
+     * itself is locked like every other Receipt and there is no route that
+     * edits it.
+     */
+    rename: protectedProcedure
+      .input(z.object({ id: z.number().int().positive(), title: z.string().trim().min(1).max(DREAM_TITLE_MAX_LENGTH) }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database is not available" });
+        const receipt = await getReceiptById(input.id);
+        if (!receipt || receipt.userId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "You can only rename your own dreams." });
+        if (resolveSemanticType(receipt.semanticType) !== "DREAM") throw new TRPCError({ code: "BAD_REQUEST", message: "Only a dream can be renamed." });
+        await db.update(receipts).set({ title: input.title }).where(eq(receipts.id, input.id));
+        return getReceiptById(input.id);
+      }),
   }),
 
   profile: router({

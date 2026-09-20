@@ -2,20 +2,29 @@ import { ABUSE_CONTACT, startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 import { DEMO_RECEIPTS, CATEGORIES, type Category } from "@shared/seed";
-import { Activity, ArrowRight, BarChart3, Bell, Heart, Check, ChevronRight, Clock3, Copy, EyeOff, Flame, Home as HomeIcon, LockKeyhole, Menu, ReceiptText, Share2, ShieldAlert, Sparkles, Target, Trophy, UserRound, UserX, X, Zap } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Activity, ArrowRight, BarChart3, Bell, Heart, Check, ChevronRight, Clock3, Copy, EyeOff, Flame, Home as HomeIcon, LockKeyhole, Menu, Mic, MicOff, Moon, ReceiptText, Search, Share2, ShieldAlert, Sparkles, Target, Trophy, UserRound, UserX, X, Zap } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Route, Router as WouterRouter, Switch, useLocation, useRoute } from "wouter";
 import { Toaster } from "@/components/ui/sonner";
 import { toast } from "sonner";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
-import { INTERACTION_COPY, SEMANTIC_TYPES, SEMANTIC_TYPE_COPY, defaultSemanticTypeFor, interactionsFor, resolveSemanticType, type SemanticType } from "@shared/interactionPolicy";
+import { COMPOSABLE_TYPES, INTERACTION_COPY, SEMANTIC_TYPES, SEMANTIC_TYPE_COPY, defaultSemanticTypeFor, interactionsFor, isResolvableType, resolveSemanticType, type SemanticType } from "@shared/interactionPolicy";
+type ComposableType = (typeof COMPOSABLE_TYPES)[number];
+/**
+ * The category's suggested type, narrowed to what the compose form can offer.
+ * No category suggests DREAM — it is captured, never composed — so the cast
+ * below is total, but it is written once here rather than at each call site.
+ */
+const composableDefaultFor = (category: string) => defaultSemanticTypeFor(category) as ComposableType;
+import { DREAM_MAX_LENGTH, DREAM_MIN_LENGTH, applySpeechResult, dreamTitleFrom, speechRecognitionCtor, type SpeechRecognitionLike } from "@shared/dream";
 import { SHARE_TARGETS } from "@/lib/sharing/adapters";
 import { availableTargets, groupedTargets, runShare, type ShareContext } from "@/lib/sharing/core";
 import { type CardFormat } from "@shared/cardFormats";
 import { MAX_REPORT_DETAIL, MODERATION_ACTION_COPY, MODERATION_ACTIONS, REPORT_REASONS, REPORT_REASON_COPY, resolveModerationStatus, type ModerationAction, type ReportReason, type ReportStatus } from "@shared/moderation";
 import { DELETED_AUTHOR_LABEL, authorLabel, isAuthorDeleted, isUnresolvable } from "@shared/accountDeletion";
 import { IS_STATIC_DEMO } from "@/lib/staticDemo";
+import { AGE_POSITION, LEGAL_STATUS, PRIVACY_POLICY, TERMS, type LegalDocument } from "@shared/legal";
 
 const dateLabel = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
 const shortDate = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" }) : "—";
@@ -63,8 +72,9 @@ function Header() {
       <Link href="/daily" onClick={() => setMenuOpen(false)}>Today</Link>
       <Link href="/feed" onClick={() => setMenuOpen(false)}>Feed</Link>
       <Link href="/receipts" onClick={() => setMenuOpen(false)}>My receipts</Link>
+      <Link href="/archive" onClick={() => setMenuOpen(false)}>Archive</Link>
+      <Link href="/dream" onClick={() => setMenuOpen(false)}>Dream</Link>
       <Link href="/challenges" onClick={() => setMenuOpen(false)}>Challenges</Link>
-      <Link href="/leaderboard" onClick={() => setMenuOpen(false)}>Leaderboard</Link>
       {isAuthenticated && <Link href="/profile" onClick={() => setMenuOpen(false)}>{user?.name || "Profile"}</Link>}
     </nav>
     <div className="header-actions">
@@ -76,7 +86,7 @@ function Header() {
 }
 
 function Page({ children, eyebrow, title, description, actions }: { children: React.ReactNode; eyebrow?: string; title?: string; description?: string; actions?: React.ReactNode }) {
-  return <><Header /><main className="page-shell">{title && <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{actions && <div className="heading-actions">{actions}</div>}</div>}{children}</main><footer className="site-footer"><span>PUT IT ON THE RECORD.</span><span>NO EDITS. NO EXCUSES.</span>{ABUSE_CONTACT && <a className="footer-contact" href={`mailto:${ABUSE_CONTACT}`}>REPORT ABUSE</a>}</footer></>;
+  return <><Header /><main className="page-shell">{title && <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{actions && <div className="heading-actions">{actions}</div>}</div>}{children}</main><footer className="site-footer"><span>PUT IT ON THE RECORD.</span><span>NO EDITS. NO EXCUSES.</span><Link href="/privacy" className="footer-contact">PRIVACY</Link><Link href="/terms" className="footer-contact">TERMS</Link>{ABUSE_CONTACT && <a className="footer-contact" href={`mailto:${ABUSE_CONTACT}`}>REPORT ABUSE</a>}</footer></>;
 }
 
 function ButtonLink({ href, children, variant = "primary", className = "" }: { href: string; children: React.ReactNode; variant?: "primary" | "secondary" | "ghost"; className?: string }) {
@@ -120,12 +130,13 @@ function Home() {
   const { data: daily } = trpc.daily.get.useQuery();
   const { data: publicReceipts } = trpc.receipts.recentPublic.useQuery();
   const featured = publicReceipts?.slice(0, 3) ?? [];
-  return <Page><section className="hero-grid">
+  return <Page><Resurfaced /><section className="hero-grid">
     <div className="hero-copy"><div className="eyebrow">A SOCIAL PREDICTION GAME</div><h1>Put it<br /><em>on the record.</em></h1><p className="hero-lede">Say what you think will happen. Lock it forever. Come back later and find out if you were right.</p><div className="hero-actions"><ButtonLink href="/create">MAKE A RECEIPT</ButtonLink><ButtonLink href="/daily" variant="secondary">SEE TODAY’S RECEIPT</ButtonLink></div><div className="hero-proof"><span><Check size={14} /> immutable by design</span><span><Check size={14} /> no money, no betting</span></div></div>
     <div className="hero-receipt-wrap"><div className="tape">THE INTERNET'S MOST HONEST RECEIPT</div><ReceiptPaper receipt={{ id: "4821", receiptNumber: "004821", prediction: daily?.prompt || "Will your next big idea actually happen?", category: daily?.category || "CULTURE", confidence: 80, status: "LOCKED", createdAt: new Date(), resolutionDate: daily?.resolutionDate || new Date(Date.now() + 30 * 86400000) }} /></div>
   </section>
-  <section className="home-band"><div className="band-stat"><span className="stat-kicker">TODAY’S QUESTION</span><strong>{daily?.prompt || "Loading the daily receipt…"}</strong><Link href="/daily">Answer it <ArrowRight size={14} /></Link></div><div className="band-stat"><span className="stat-kicker">THE LOOP</span><strong>Predict. Lock. Resolve. Repeat.</strong><span className="muted">Your history becomes your reputation.</span></div><div className="band-stat"><span className="stat-kicker">NEXT RECEIPT</span><strong><Clock3 size={16} /> 23:41:08</strong><span className="muted">A new question every day.</span></div></section>
-  <section className="section-block"><SectionLabel action={<Link href="/leaderboard" className="text-link">SEE LEADERBOARD <ArrowRight size={14} /></Link>}>THE RECEIPT ROLL CALL</SectionLabel><div className="receipt-row">{featured.length ? featured.map((item) => <Link href={`/r/${item.receipt.id}`} key={item.receipt.id}><ReceiptPaper receipt={{ ...item.receipt, receiptNumber: String(item.receipt.id).padStart(6, "0"), prediction: item.receipt.prediction }} compact /></Link>) : DEMO_RECEIPTS.map((item) => <div key={item.id} className="demo-wrap"><ReceiptPaper receipt={item} compact demo /><span className="demo-label">DEMO DATA</span></div>)}</div></section>
+  <section className="home-band"><div className="band-stat"><span className="stat-kicker">TODAY’S QUESTION</span><strong>{daily?.prompt || "No prompt today — write your own."}</strong><Link href="/daily">{daily ? "Answer it" : "Write one"} <ArrowRight size={14} /></Link></div><div className="band-stat"><span className="stat-kicker">THE LOOP</span><strong>Predict. Lock. Resolve. Repeat.</strong><span className="muted">Your history becomes your reputation.</span></div><div className="band-stat"><span className="stat-kicker">NEXT RECEIPT</span><strong><Clock3 size={16} /> 23:41:08</strong><span className="muted">A new question every day.</span></div></section>
+  <section className="section-block"><SectionLabel action={<Link href="/feed" className="text-link">SEE THE FEED <ArrowRight size={14} /></Link>}>RECENTLY ON THE RECORD</SectionLabel><div className="receipt-row">{featured.length ? featured.map((item) => <Link href={`/r/${item.receipt.id}`} key={item.receipt.id}><ReceiptPaper receipt={{ ...item.receipt, receiptNumber: String(item.receipt.id).padStart(6, "0"), prediction: item.receipt.prediction }} compact /></Link>) : DEMO_RECEIPTS.map((item) => <div key={item.id} className="demo-wrap"><ReceiptPaper receipt={item} compact demo /><span className="demo-label">DEMO DATA</span></div>)}</div></section>
+  <DreamEntry />
   <section className="manifesto"><span className="manifesto-mark">“</span><p>You said it. We timestamped it. Now let’s see if you were right.</p><span className="manifesto-note">— THE RECEIPT, since today</span></section>
   </Page>;
 }
@@ -163,7 +174,7 @@ function Daily() {
   const mutation = trpc.daily.answer.useMutation({ onSuccess: (receipt) => { setLockedReceipt(receipt); utils.daily.status.invalidate(); toast.success("Receipt locked. No takebacks."); } });
   const submit = () => { if (!answer) return; if (!isAuthenticated) return startLogin(); if (daily) mutation.mutate({ answer, confidence }); };
   if (lockedReceipt) return <Page eyebrow="DAILY RECEIPT" title="It’s on the record." description="Your answer is locked. The future can do what it wants now."><div className="locked-layout"><div><div className="success-lock"><LockKeyhole size={18} /> RECEIPT LOCKED</div><ReceiptPaper receipt={{ ...lockedReceipt, receiptNumber: String(lockedReceipt.id).padStart(6, "0") }} /><div className="inline-success">Locked successfully. Your future self will deal with this.</div></div><div className="side-note"><span className="eyebrow">YOUR CALL</span><h3>{answer} at {confidence}%.</h3><p>Share the receipt or keep it private. Either way, the timestamp is doing its job.</p><ButtonLink href={`/receipt/${lockedReceipt.id}`}>VIEW RECEIPT</ButtonLink><ButtonLink href="/create" variant="secondary">MAKE ANOTHER</ButtonLink></div></div></Page>;
-  return <Page eyebrow="DAILY RECEIPT · EVERY DAY, ONE QUESTION" title="What’s your call?" description="One prompt. One answer. No edits after you lock it."><div className="daily-layout"><div className="daily-card"><div className="daily-card-top"><Tag dark>{daily?.category || "LOADING"}</Tag><span className="daily-date">TODAY · #00{daily?.id || "—"}</span></div><div className="daily-question">{isLoading ? "Loading today’s question…" : `“${daily?.prompt}”`}</div><div className="answer-row"><button className={`answer-button ${answer === "YES" ? "selected yes" : ""}`} onClick={() => setAnswer("YES")}><span>YES</span><Check size={20} /></button><button className={`answer-button ${answer === "NO" ? "selected no" : ""}`} onClick={() => setAnswer("NO")}><span>NO</span><X size={20} /></button></div><div className="confidence-block"><div className="confidence-head"><span>HOW CONFIDENT ARE YOU?</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>WILD GUESS</span><span>LOCKED IN</span></div></div><div className="lock-action"><button className="button button-dark button-wide" disabled={!answer || mutation.isPending} onClick={submit}><LockKeyhole size={17} /> {mutation.isPending ? "PRINTING…" : "LOCK IT IN"}</button><span>Once printed, it can’t be edited.</span></div>{mutation.error && <div className="error-message">{mutation.error.message}</div>}</div><StreakAside status={status} isAuthenticated={isAuthenticated} /></div></Page>;
+  return <Page eyebrow="DAILY RECEIPT · EVERY DAY, ONE QUESTION" title="What’s your call?" description="One prompt. One answer. No edits after you lock it."><div className="daily-layout"><div className="daily-card"><div className="daily-card-top"><Tag dark>{daily?.category || "LOADING"}</Tag><span className="daily-date">TODAY · #00{daily?.id ?? "—"}</span></div><div className="daily-question">{isLoading ? "Loading today’s question…" : daily ? `“${daily.prompt}”` : "No prompt today."}</div>{!isLoading && !daily && <p className="muted daily-none">Every prompt is read and approved by a person before it goes out, and none is approved for today. <Link href="/create" className="text-link">Write your own receipt</Link> instead.</p>}<div className="answer-row"><button className={`answer-button ${answer === "YES" ? "selected yes" : ""}`} onClick={() => setAnswer("YES")}><span>YES</span><Check size={20} /></button><button className={`answer-button ${answer === "NO" ? "selected no" : ""}`} onClick={() => setAnswer("NO")}><span>NO</span><X size={20} /></button></div><div className="confidence-block"><div className="confidence-head"><span>HOW CONFIDENT ARE YOU?</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>WILD GUESS</span><span>LOCKED IN</span></div></div><div className="lock-action"><button className="button button-dark button-wide" disabled={!answer || !daily || mutation.isPending} onClick={submit}><LockKeyhole size={17} /> {mutation.isPending ? "PRINTING…" : "LOCK IT IN"}</button><span>Once printed, it can’t be edited.</span></div>{mutation.error && <div className="error-message">{mutation.error.message}</div>}</div><StreakAside status={status} isAuthenticated={isAuthenticated} /></div></Page>;
 }
 
 function Create() {
@@ -178,16 +189,16 @@ function Create() {
   // suggests a starting point, and only until they touch the control.
   // A ME TOO suggests the same kind as the receipt it follows; otherwise the
   // category suggests one. Either way the author can change it.
-  const [semanticType, setSemanticType] = useState<SemanticType>(() => {
+  const [semanticType, setSemanticType] = useState<ComposableType>(() => {
     const hinted = new URLSearchParams(window.location.search).get("kind");
-    return (SEMANTIC_TYPES as readonly string[]).includes(hinted ?? "")
-      ? (hinted as SemanticType)
-      : defaultSemanticTypeFor("LIFE");
+    return (COMPOSABLE_TYPES as readonly string[]).includes(hinted ?? "")
+      ? (hinted as ComposableType)
+      : composableDefaultFor("LIFE");
   });
   // A hinted kind is already the author's context, so the category should not
   // overwrite it when they pick one.
   const [typeTouched, setTypeTouched] = useState(() =>
-    (SEMANTIC_TYPES as readonly string[]).includes(new URLSearchParams(window.location.search).get("kind") ?? ""),
+    (COMPOSABLE_TYPES as readonly string[]).includes(new URLSearchParams(window.location.search).get("kind") ?? ""),
   );
   const [challengeUsername, setChallengeUsername] = useState("");
   const [confirmed, setConfirmed] = useState(false);
@@ -195,8 +206,9 @@ function Create() {
   const [search] = useState(() => new URLSearchParams(window.location.search));
   const derivedFromId = Number(search.get("from")) || undefined;
   const mutation = trpc.receipts.create.useMutation({ onSuccess: (receipt) => { toast.success("Receipt printed."); navigate(`/receipt/${receipt.id}`); } });
-  const submit = () => { if (!isAuthenticated) return startLogin(); if (!confirmed) return; mutation.mutate({ prediction, category, resolutionDate: new Date(`${resolutionDate}T23:59:00`), confidence, visibility, challengeUsername: challengeUsername || undefined, semanticType, derivedFromId }); };
-  return <Page eyebrow="CUSTOM RECEIPT" title="Say it with your chest." description="The prediction is yours. The timestamp is ours."><div className="create-layout"><div className="form-card">{derivedFromId ? <div className="derived-note"><span className="eyebrow">YOUR OWN CALL</span><p>You're writing your own receipt after someone else's. Say it your way — the confidence and the date are yours.</p></div> : null}<div className="type-picker"><span className="field-label type-picker-label">WHAT KIND OF PREDICTION IS THIS?</span><div className="type-options">{SEMANTIC_TYPES.map((item) => <button key={item} type="button" className={semanticType === item ? "active" : ""} onClick={() => { setSemanticType(item); setTypeTouched(true); }}><strong>{SEMANTIC_TYPE_COPY[item].label}</strong><span>{SEMANTIC_TYPE_COPY[item].blurb}</span></button>)}</div></div><label className="field-label">WHAT DO YOU THINK WILL HAPPEN?<textarea value={prediction} onChange={(event) => setPrediction(event.target.value)} maxLength={280} placeholder="I think…" rows={4} /><span className="char-count">{prediction.length}/280</span></label><div className="form-grid"><label className="field-label">CATEGORY<select value={category} onChange={(event) => { const next = event.target.value as Category; setCategory(next); if (!typeTouched) setSemanticType(defaultSemanticTypeFor(next)); }}>{CATEGORIES.map((item) => <option key={item}>{item}</option>)}</select></label><label className="field-label">RESOLUTION DATE<input type="date" value={resolutionDate} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setResolutionDate(event.target.value)} /></label></div><div className="confidence-block form-confidence"><div className="confidence-head"><span>HOW CONFIDENT?</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>VIBES</span><span>ABSOLUTE FACT (TO ME)</span></div></div><label className="field-label">CHALLENGE SOMEONE <span className="optional">OPTIONAL</span><input value={challengeUsername} onChange={(event) => setChallengeUsername(event.target.value)} placeholder="@username" /></label><div className="visibility-toggle"><button className={visibility === "PUBLIC" ? "active" : ""} onClick={() => setVisibility("PUBLIC")}>PUBLIC <span>Shareable link</span></button><button className={visibility === "PRIVATE" ? "active" : ""} onClick={() => setVisibility("PRIVATE")}>PRIVATE <span>Just for you</span></button></div><label className="confirm-row"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>Once you print it, you can’t edit it. I understand future-me may disagree.</span></label><button className="button button-dark button-wide" disabled={!prediction.trim() || !confirmed || mutation.isPending} onClick={submit}><LockKeyhole size={17} /> {mutation.isPending ? "PRINTING…" : "LOCK IT IN"}</button>{mutation.error && <div className="error-message">{mutation.error.message}</div>}</div><div className="preview-column"><span className="eyebrow">LIVE PREVIEW</span><ReceiptPaper receipt={{ id: "4821", receiptNumber: "004821", prediction: prediction || "Your prediction goes here.", category, confidence, status: "PENDING", createdAt: new Date(), resolutionDate }} /><p className="preview-caption">This is what your future self will find.</p></div></div></Page>;
+  const resolvable = isResolvableType(semanticType);
+  const submit = () => { if (!isAuthenticated) return startLogin(); if (!confirmed) return; mutation.mutate({ prediction, category, resolutionDate: resolvable ? new Date(`${resolutionDate}T23:59:00`) : undefined, confidence, visibility, challengeUsername: challengeUsername || undefined, semanticType, derivedFromId }); };
+  return <Page eyebrow="CUSTOM RECEIPT" title="Say it with your chest." description="The prediction is yours. The timestamp is ours."><div className="create-layout"><div className="form-card">{derivedFromId ? <div className="derived-note"><span className="eyebrow">YOUR OWN CALL</span><p>You're writing your own receipt after someone else's. Say it your way — the confidence and the date are yours.</p></div> : null}<div className="type-picker"><span className="field-label type-picker-label">WHAT KIND OF RECEIPT IS THIS?</span><div className="type-options">{COMPOSABLE_TYPES.map((item) => <button key={item} type="button" className={semanticType === item ? "active" : ""} onClick={() => { setSemanticType(item); setTypeTouched(true); }}><strong>{SEMANTIC_TYPE_COPY[item].label}</strong><span>{SEMANTIC_TYPE_COPY[item].blurb}</span></button>)}</div></div><label className="field-label">{resolvable ? "WHAT DO YOU THINK WILL HAPPEN?" : "WHAT JUST HAPPENED?"}<textarea value={prediction} onChange={(event) => setPrediction(event.target.value)} maxLength={280} placeholder={resolvable ? "I think…" : "Today…"} rows={4} /><span className="char-count">{prediction.length}/280</span></label><SimilarInArchive text={prediction} /><div className="form-grid"><label className="field-label">CATEGORY<select value={category} onChange={(event) => { const next = event.target.value as Category; setCategory(next); if (!typeTouched) setSemanticType(composableDefaultFor(next)); }}>{CATEGORIES.map((item) => <option key={item}>{item}</option>)}</select></label>{resolvable ? <label className="field-label">RESOLUTION DATE<input type="date" value={resolutionDate} min={new Date().toISOString().slice(0, 10)} onChange={(event) => setResolutionDate(event.target.value)} /></label> : <div className="field-label memory-note"><span>WHEN DOES IT RESOLVE?</span><p>It doesn’t. A memory isn’t right or wrong — it’s kept, and handed back to you later.</p></div>}</div><div className="confidence-block form-confidence"><div className="confidence-head"><span>{resolvable ? "HOW CONFIDENT?" : "HOW MUCH DOES IT MATTER RIGHT NOW?"}</span><strong>{confidence}%</strong></div><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} className="confidence-slider" /><div className="range-labels"><span>VIBES</span><span>ABSOLUTE FACT (TO ME)</span></div></div><label className="field-label">CHALLENGE SOMEONE <span className="optional">OPTIONAL</span><input value={challengeUsername} onChange={(event) => setChallengeUsername(event.target.value)} placeholder="@username" /></label><div className="visibility-toggle"><button className={visibility === "PUBLIC" ? "active" : ""} onClick={() => setVisibility("PUBLIC")}>PUBLIC <span>Shareable link</span></button><button className={visibility === "PRIVATE" ? "active" : ""} onClick={() => setVisibility("PRIVATE")}>PRIVATE <span>Just for you</span></button></div><label className="confirm-row"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>{resolvable ? "Once you print it, you can’t edit it. I understand future-me may disagree." : "Once you print it, you can’t edit it. Future-me gets it exactly as written."}</span></label><button className="button button-dark button-wide" disabled={!prediction.trim() || !confirmed || mutation.isPending} onClick={submit}><LockKeyhole size={17} /> {mutation.isPending ? "PRINTING…" : "LOCK IT IN"}</button>{mutation.error && <div className="error-message">{mutation.error.message}</div>}</div><div className="preview-column"><span className="eyebrow">LIVE PREVIEW</span><ReceiptPaper receipt={{ id: "4821", receiptNumber: "004821", prediction: prediction || "Your prediction goes here.", category, confidence, status: "PENDING", createdAt: new Date(), resolutionDate }} /><p className="preview-caption">This is what your future self will find.</p></div></div></Page>;
 }
 
 /**
@@ -270,6 +282,7 @@ function MeTooCluster({ cluster }: { cluster: { total: number; open: number; rig
       <strong>{cluster.total}</strong>
       <span>{cluster.total === 1 ? "person called this" : "people called this"}</span>
     </div>
+    {cluster.resolved > 0 && <span className="cluster-metric-label">HOW THEIR CALLS TURNED OUT</span>}
     {cluster.resolved > 0 && <div className="cluster-outcomes">
       {outcomes.map((outcome) => <span key={outcome.label} className={outcome.className}>
         <b>{outcome.value}</b> {outcome.label}
@@ -422,7 +435,7 @@ function ReceiptDetail() {
   const track = trpc.analytics.track.useMutation();
   // The server refuses resolution before resolutionDate, so the buttons only
   // appear once the receipt is actually due.
-  const isDue = receipt ? Date.now() >= new Date(receipt.resolutionDate).getTime() : false;
+  const isDue = receipt?.resolutionDate ? Date.now() >= new Date(receipt.resolutionDate).getTime() : false;
   const shareContext: ShareContext = useMemo(() => {
     const base = import.meta.env.BASE_URL.replace(/\/$/, "");
     const canonical = `${window.location.origin}${base}/r/${id}`;
@@ -573,12 +586,6 @@ function PublicProfile() {
     {receipts.length ? <div className="feed-grid">{receipts.map((receipt) => <Link href={`/r/${receipt.id}`} key={receipt.id}><ReceiptPaper receipt={{ ...receipt, receiptNumber: String(receipt.id).padStart(6, "0") }} compact /></Link>)}</div>
       : <div className="empty-state compact"><ReceiptText size={28} /><h3>Nothing public yet.</h3><p>This caller keeps their receipts to themselves.</p></div>}
   </Page>;
-}
-
-function Leaderboard() {
-  const rows = [{ name: "Mina", handle: "@minacalls", right: 43, accuracy: 82, streak: 18, badge: "BEST ACCURACY" }, { name: "Jules", handle: "@julesonrecord", right: 51, accuracy: 74, streak: 11, badge: "MOST RIGHT" }, { name: "Tariq", handle: "@tariqpredicts", right: 38, accuracy: 71, streak: 27, badge: "LONGEST STREAK" }, { name: "Brianna", handle: "@brianna", right: 31, accuracy: 68, streak: 19, badge: "DEMO PROFILE" }];
-  const [view, setView] = useState("MOST RIGHT");
-  return <Page eyebrow="THE RECEIPT ROLL CALL" title="Leaderboard" description="Skill, consistency, and the occasional wildly confident call."><div className="leaderboard-tabs">{["MOST RIGHT", "BEST ACCURACY", "LONGEST STREAK", "BIGGEST CALLS"].map((item) => <button key={item} className={view === item ? "active" : ""} onClick={() => setView(item)}>{item}</button>)}</div><div className="leaderboard-table"><div className="table-head"><span>#</span><span>CALLER</span><span>RIGHT</span><span>ACCURACY</span><span>STREAK</span></div>{rows.map((row, index) => <div className="table-row" key={row.handle}><span className="rank">{String(index + 1).padStart(2, "0")}</span><div className="caller"><span className="caller-avatar">{row.name[0]}</span><div><strong>{row.name}</strong><span>{row.handle}</span></div></div><strong>{row.right}</strong><strong>{row.accuracy}%</strong><strong className="streak-value"><Flame size={14} /> {row.streak}</strong></div>)}</div><div className="demo-note"><span>DEMO LEADERBOARD</span><p>Seed profiles keep the board lively while the first real calls roll in.</p></div></Page>;
 }
 
 function Profile() {
@@ -763,7 +770,314 @@ function AuthPrompt({ title, description }: { title: string; description: string
 
 function NotFound() { return <Page title="404"><div className="empty-state"><ReceiptText size={34} /><h3>This page is off the record.</h3><ButtonLink href="/">BACK HOME</ButtonLink></div></Page>; }
 
-function Router() { return <Switch><Route path="/" component={Home} /><Route path="/daily" component={Daily} /><Route path="/create" component={Create} /><Route path="/receipts" component={MyReceipts} /><Route path="/receipt/:id" component={ReceiptDetail} /><Route path="/r/:id" component={ReceiptDetail} /><Route path="/challenges" component={Challenges} /><Route path="/challenge/:id" component={ChallengeDetail} /><Route path="/feed" component={Feed} /><Route path="/u/:username" component={PublicProfile} /><Route path="/leaderboard" component={Leaderboard} /><Route path="/analytics" component={Analytics} /><Route path="/moderation" component={Moderation} /><Route path="/profile" component={Profile} /><Route component={NotFound} /></Switch>; }
+
+/**
+ * "You wrote something similar before", shown while composing.
+ *
+ * Deliberately quiet: it needs a real overlap of content words before it says
+ * anything, and it never claims the two are connected — only that you wrote
+ * one and are now writing the other. Dreams are excluded server-side, so this
+ * can never present a dream as a precedent for a waking claim.
+ */
+function SimilarInArchive({ text }: { text: string }) {
+  const [debounced, setDebounced] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(text), 600);
+    return () => clearTimeout(timer);
+  }, [text]);
+  const { isAuthenticated } = useAuth();
+  const { data } = trpc.archive.similar.useQuery(
+    { text: debounced },
+    { enabled: isAuthenticated && debounced.trim().length >= 12 },
+  );
+  if (!data?.receipt) return null;
+  return <div className="archive-echo">
+    <span className="eyebrow">YOU'VE BEEN HERE BEFORE</span>
+    <p>On {new Date(data.receipt.createdAt).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })} you wrote something similar.</p>
+    <Link href={`/receipt/${data.receipt.id}`} className="text-link">“{data.receipt.prediction}”</Link>
+  </div>;
+}
+
+/**
+ * A receipt handed back to you because today is its anniversary.
+ *
+ * At most one a day, and nothing at all on most days. It states the date and
+ * what you wrote, and stops there — it does not tell you what it meant, and it
+ * never suggests one receipt caused or predicted another.
+ */
+function Resurfaced() {
+  const { isAuthenticated } = useAuth();
+  const { data } = trpc.archive.resurfaced.useQuery(undefined, { enabled: isAuthenticated });
+  const [dismissed, setDismissed] = useState(false);
+  if (!data?.receipt || dismissed) return null;
+  const { receipt, years } = data;
+  const status = resolveSemanticType(receipt.semanticType);
+  return <section className="resurfaced-band">
+    <div>
+      <span className="eyebrow">{years === 1 ? "A YEAR AGO TODAY" : `${years} YEARS AGO TODAY`}</span>
+      <p className="resurfaced-text">“{receipt.prediction}”</p>
+      <span className="resurfaced-meta">
+        {status === "MEMORY" ? "You kept this." : `You were ${receipt.confidence}% sure.`}
+        {receipt.status !== "PENDING" && receipt.status !== "LOCKED" ? ` · ${receipt.status}` : ""}
+      </span>
+    </div>
+    <div className="resurfaced-actions">
+      <Link href={`/receipt/${receipt.id}`} className="button button-dark button-small">OPEN IT</Link>
+      <button className="text-link" onClick={() => setDismissed(true)}>Not now</button>
+    </div>
+  </section>;
+}
+
+const ARCHIVE_TYPE_FILTERS = ["PREDICTION", "GOAL", "PERSONAL", "FUN", "MEMORY", "DREAM"] as const;
+
+/**
+ * The archive: everything you have ever written, and a way back into it.
+ *
+ * Scoped entirely to the signed-in person's own receipts. There is no public
+ * variant of this screen and no public procedure behind it, which is what
+ * keeps somebody else's private receipt — or anyone's dream — out of it.
+ */
+function Archive() {
+  const { isAuthenticated } = useAuth();
+  const [query, setQuery] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [type, setType] = useState<string | null>(null);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(query.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  const { data: summary } = trpc.archive.summary.useQuery(undefined, { enabled: isAuthenticated });
+  const { data, isLoading } = trpc.archive.search.useQuery(
+    { query: debounced || undefined, semanticType: (type ?? undefined) as any },
+    { enabled: isAuthenticated },
+  );
+
+  if (!isAuthenticated) {
+    return <Page eyebrow="THE ARCHIVE" title="Your own record." description="Everything you've written, and a way back to it.">
+      <div className="empty-state"><p>Sign in to search your archive.</p><button className="button button-dark" onClick={() => startLogin()}>SIGN IN</button></div>
+    </Page>;
+  }
+
+  const counts = new Map((summary?.byType ?? []).map((row) => [row.semanticType ?? "PREDICTION", row.total]));
+  const items = data?.items ?? [];
+
+  return <Page eyebrow="THE ARCHIVE" title="Your own record." description="Everything you've written. Nothing anyone else can see.">
+    <div className="archive-controls">
+      <input
+        className="archive-search"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder="Search everything you've written…"
+        aria-label="Search your archive"
+      />
+      <div className="archive-filters">
+        <button className={type === null ? "active" : ""} onClick={() => setType(null)}>ALL {summary?.total ? <b>{summary.total}</b> : null}</button>
+        {ARCHIVE_TYPE_FILTERS.filter((item) => counts.get(item)).map((item) => (
+          <button key={item} className={type === item ? "active" : ""} onClick={() => setType(item)}>
+            {SEMANTIC_TYPE_COPY[item].label.toUpperCase()} <b>{counts.get(item)}</b>
+          </button>
+        ))}
+      </div>
+    </div>
+
+    {isLoading ? <p className="muted">Looking…</p> : items.length ? (
+      <div className="archive-list">
+        {items.map((receipt) => <ArchiveRow key={receipt.id} receipt={receipt} />)}
+      </div>
+    ) : (
+      <div className="empty-state">
+        {debounced
+          ? <><p>Nothing in your archive matches “{debounced}”.</p><p className="muted">Search looks at what you wrote, the title, and any note you left when you resolved it.</p></>
+          : <><p>Your archive is empty.</p><p className="muted">Everything you write is kept here — predictions, goals, memories and dreams — and it gets more useful the longer you use it.</p><Link href="/create" className="button button-dark">WRITE ONE</Link></>}
+      </div>
+    )}
+  </Page>;
+}
+
+function ArchiveRow({ receipt }: { receipt: any }) {
+  const type = resolveSemanticType(receipt.semanticType);
+  const open = receipt.status === "PENDING" || receipt.status === "LOCKED";
+  return <Link href={`/receipt/${receipt.id}`} className="archive-row">
+    <div className="archive-row-top">
+      <Tag>{SEMANTIC_TYPE_COPY[type].label.toUpperCase()}</Tag>
+      <span className="archive-date">{new Date(receipt.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</span>
+      {receipt.visibility === "PRIVATE" && <span className="archive-private">PRIVATE</span>}
+    </div>
+    <strong className="archive-text">{receipt.title || receipt.prediction}</strong>
+    <div className="archive-row-bottom">
+      {/* Namespaced: the bare status-* classes carry background colours used
+          by the confidence bar, which would paint a block behind this. */}
+      <span className={`archive-status archive-status-${open ? "open" : receipt.status.toLowerCase().replace(/\s+/g, "-")}`}>
+        {type === "MEMORY" || type === "DREAM" ? "KEPT" : open ? "OPEN" : receipt.status}
+      </span>
+      {receipt.result && <span className="archive-note">{receipt.result}</span>}
+    </div>
+  </Link>;
+}
+
+/**
+ * Dream capture.
+ *
+ * One tap from a cold open to a running microphone. The ordering matters: the
+ * recogniser is started first and the screen renders around it, because the
+ * thing being captured evaporates in about ninety seconds.
+ *
+ * Nothing here uploads audio. Recognition happens in the browser, the
+ * transcript is the only thing that is ever sent, and the recogniser is
+ * aborted on unmount so the microphone cannot be left open.
+ */
+function DreamCapture() {
+  const { isAuthenticated } = useAuth();
+  const [, navigate] = useLocation();
+  const [committed, setCommitted] = useState("");
+  const [interim, setInterim] = useState("");
+  const [listening, setListening] = useState(false);
+  const [supported, setSupported] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const recognition = useRef<SpeechRecognitionLike | null>(null);
+
+  const stop = useCallback(() => {
+    recognition.current?.stop();
+    setListening(false);
+  }, []);
+
+  const start = useCallback(() => {
+    const Ctor = speechRecognitionCtor();
+    if (!Ctor) { setSupported(false); return; }
+    const instance = new Ctor();
+    instance.continuous = true;
+    instance.interimResults = true;
+    instance.lang = navigator.language || "en-US";
+    instance.onresult = (event) => {
+      const next = applySpeechResult(committedRef.current, event);
+      committedRef.current = next.committed;
+      setCommitted(next.committed);
+      setInterim(next.interim);
+    };
+    instance.onerror = (event) => {
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        setSupported(false);
+        setError("The microphone is blocked. You can type it instead.");
+      }
+      setListening(false);
+    };
+    instance.onend = () => setListening(false);
+    recognition.current = instance;
+    try {
+      instance.start();
+      setListening(true);
+    } catch {
+      setSupported(false);
+    }
+  }, []);
+
+  // Kept in a ref as well as state: the recogniser's callback closes over the
+  // value at the time it was registered, and re-registering it mid-utterance
+  // drops words.
+  const committedRef = useRef("");
+  useEffect(() => { committedRef.current = committed; }, [committed]);
+
+  // The microphone opens on arrival, not on a second tap. Waking up and being
+  // asked to press another button is how a dream gets lost.
+  useEffect(() => {
+    if (isAuthenticated) start();
+    return () => { recognition.current?.abort(); };
+  }, [isAuthenticated, start]);
+
+  const capture = trpc.dreams.capture.useMutation({
+    onSuccess: (receipt) => { toast.success("Dream kept."); navigate(`/receipt/${receipt.id}`); },
+    onError: (err) => setError(err.message),
+  });
+
+  const transcript = `${committed} ${interim}`.trim();
+  const canSave = committed.trim().length >= DREAM_MIN_LENGTH;
+
+  if (!isAuthenticated) {
+    return <Page eyebrow="DREAM" title="I just woke up." description="Sign in first — a dream is private, and private needs an account.">
+      <div className="empty-state"><button className="button button-dark" onClick={() => startLogin()}>SIGN IN</button></div>
+    </Page>;
+  }
+
+  return <Page eyebrow="DREAM" title="I just woke up.">
+    <div className="dream-capture">
+      <div className={`dream-mic ${listening ? "listening" : ""}`} aria-live="polite">
+        {listening ? <><Mic size={22} /> <span>LISTENING. JUST TALK.</span></> : <><MicOff size={22} /> <span>{supported ? "PAUSED" : "TYPE IT INSTEAD"}</span></>}
+      </div>
+
+      <textarea
+        className="dream-transcript"
+        value={listening ? transcript : committed}
+        onChange={(event) => { committedRef.current = event.target.value; setCommitted(event.target.value); setInterim(""); }}
+        placeholder="I was in a house I didn't recognise…"
+        rows={10}
+        maxLength={DREAM_MAX_LENGTH}
+      />
+
+      {committed.trim() && <p className="dream-title-preview">It'll be filed as <strong>{dreamTitleFrom(committed)}</strong>. You can rename it later.</p>}
+
+      <div className="dream-actions">
+        {listening
+          ? <button className="button" onClick={stop}>STOP</button>
+          : <button className="button" onClick={start} disabled={!supported}>{supported ? "KEEP TALKING" : "MIC UNAVAILABLE"}</button>}
+        <button className="button button-dark" disabled={!canSave || capture.isPending} onClick={() => { stop(); capture.mutate({ transcript: committed.trim() }); }}>
+          <LockKeyhole size={16} /> {capture.isPending ? "KEEPING…" : "KEEP IT"}
+        </button>
+      </div>
+
+      {error && <div className="error-message">{error}</div>}
+
+      <p className="dream-privacy">
+        Private, always. A dream is never public, never in the feed, never shared, and never
+        interpreted — this app will not tell you what it meant, and will never say a dream predicted
+        anything. The recording stays in your browser: only the words are saved. Delete your
+        account and every dream goes with it.
+      </p>
+    </div>
+  </Page>;
+}
+
+/**
+ * The way into dream capture. Placed where a half-awake person can hit it
+ * without reading anything, and worded so it is obvious what happens next.
+ */
+function DreamEntry() {
+  return <section className="dream-entry">
+    <div>
+      <span className="eyebrow"><Moon size={13} /> DREAM</span>
+      <strong>I just woke up.</strong>
+      <p>One tap, talk, done. Private forever — never public, never in the feed, never interpreted.</p>
+    </div>
+    <ButtonLink href="/dream">CAPTURE IT</ButtonLink>
+  </section>;
+}
+
+/**
+ * Privacy and Terms.
+ *
+ * Both are drafts and say so at the top, in the product rather than in a
+ * footnote. The text lives in shared/legal.ts so that the page and anything
+ * else that needs it read the same words.
+ */
+function LegalPage({ document }: { document: LegalDocument }) {
+  return <Page eyebrow="THE RECEIPT" title={document.title} description={`Last updated ${document.updated}.`}>
+    <div className="legal">
+      <div className="legal-status"><ShieldAlert size={15} /> <span>{LEGAL_STATUS}</span></div>
+      {document.intro.map((line, index) => <p key={index} className="legal-intro">{line}</p>)}
+      {document.sections.map((section) => <section key={section.heading} className="legal-section">
+        <h2>{section.heading}</h2>
+        {section.body.map((line, index) => <p key={index}>{line}</p>)}
+      </section>)}
+      <section className="legal-section">
+        <h2>Age</h2>
+        <p>{AGE_POSITION}</p>
+      </section>
+      {ABUSE_CONTACT && <p className="legal-contact">Questions, or a legal notice: <a href={`mailto:${ABUSE_CONTACT}`}>{ABUSE_CONTACT}</a></p>}
+    </div>
+  </Page>;
+}
+
+function Router() { return <Switch><Route path="/" component={Home} /><Route path="/daily" component={Daily} /><Route path="/create" component={Create} /><Route path="/receipts" component={MyReceipts} /><Route path="/receipt/:id" component={ReceiptDetail} /><Route path="/r/:id" component={ReceiptDetail} /><Route path="/challenges" component={Challenges} /><Route path="/challenge/:id" component={ChallengeDetail} /><Route path="/feed" component={Feed} /><Route path="/archive" component={Archive} /><Route path="/dream" component={DreamCapture} /><Route path="/privacy">{() => <LegalPage document={PRIVACY_POLICY} />}</Route><Route path="/terms">{() => <LegalPage document={TERMS} />}</Route><Route path="/u/:username" component={PublicProfile} /><Route path="/analytics" component={Analytics} /><Route path="/moderation" component={Moderation} /><Route path="/profile" component={Profile} /><Route component={NotFound} /></Switch>; }
 
 // GitHub Pages serves the app from /THE-RECEIPT/, so every route is prefixed
 // with Vite's base path. It is "/" for the normal server build.

@@ -25,13 +25,27 @@ export const users = mysqlTable("users", {
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
 });
 
+/**
+ * The daily prompt.
+ *
+ * A prompt is shown to everybody on the same day, so it does not reach anyone
+ * until a person has signed it off. A row starts as DRAFT, an administrator
+ * approves it into OPEN or turns it down as REJECTED, and only OPEN rows are
+ * ever served. See shared/promptReview.ts for the screen that runs first, and
+ * `daily.approve` for where the signature is recorded.
+ */
 export const dailyChallenges = mysqlTable("dailyChallenges", {
   id: int("id").autoincrement().primaryKey(),
   prompt: text("prompt").notNull(),
   category: varchar("category", { length: 32 }).notNull(),
   publishDate: timestamp("publishDate").notNull(),
   resolutionDate: timestamp("resolutionDate").notNull(),
-  status: mysqlEnum("status", ["OPEN", "CLOSED"]).default("OPEN").notNull(),
+  status: mysqlEnum("status", ["DRAFT", "OPEN", "CLOSED", "REJECTED"]).default("DRAFT").notNull(),
+  /** The person who approved it. Null while it is still a draft. */
+  approvedBy: int("approvedBy"),
+  approvedAt: timestamp("approvedAt"),
+  /** Why it was turned down, or a note left alongside an approval. */
+  reviewNote: text("reviewNote"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
@@ -47,7 +61,11 @@ export const receipts = mysqlTable(
     category: varchar("category", { length: 32 }).notNull(),
     confidence: int("confidence").notNull(),
     createdAt: timestamp("createdAt").defaultNow().notNull(),
-    resolutionDate: timestamp("resolutionDate").notNull(),
+    // Null for the types reality never answers (MEMORY, DREAM). Every
+    // resolution path gates on the semantic type rather than on this column —
+    // see isResolvableType in shared/interactionPolicy.ts — so a null here is
+    // never read by code that expects a date.
+    resolutionDate: timestamp("resolutionDate"),
     status: mysqlEnum("status", ["LOCKED", "PENDING", "RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"]).default("PENDING").notNull(),
     result: text("result"),
     visibility: mysqlEnum("visibility", ["PUBLIC", "PRIVATE"]).default("PUBLIC").notNull(),
@@ -58,7 +76,12 @@ export const receipts = mysqlTable(
     // offers. Nullable because Receipts written before this existed have no
     // author choice to record — see LEGACY_SEMANTIC_TYPE in
     // shared/interactionPolicy.ts for how they are read.
-    semanticType: mysqlEnum("semanticType", ["PREDICTION", "GOAL", "PERSONAL", "FUN"]),
+    semanticType: mysqlEnum("semanticType", ["PREDICTION", "GOAL", "PERSONAL", "FUN", "MEMORY", "DREAM"]),
+    // A short human label. Dreams derive one from the first clause of the
+    // transcript so the archive is readable; the author can rename it. The
+    // Receipt's own text is never editable — the title is a label on the
+    // record, not the record.
+    title: varchar("title", { length: 120 }),
     // The Receipt this one was written after ("ME TOO"). The new Receipt is
     // independently authored and locked; this only records where it came from.
     derivedFromId: int("derivedFromId"),
@@ -78,6 +101,9 @@ export const receipts = mysqlTable(
     // answer them.
     index("receipts_visibility_status_resolution").on(table.visibility, table.status, table.resolutionDate),
     index("receipts_derived_from").on(table.derivedFromId),
+    // Archive search and resurfacing both read one person's own receipts
+    // newest-first, narrowed by type.
+    index("receipts_user_type_id").on(table.userId, table.semanticType, table.id),
   ],
 );
 

@@ -246,6 +246,51 @@ describe("private receipts", () => {
     expect(writesTo("receipts").some((w) => w.op === "update" && w.values?.derivedFromId === null)).toBe(true);
   });
 
+  it("delete a dream even when a report points at it", async () => {
+    // The one override on the retain-and-detach rule. A dream is the most
+    // involuntary thing anyone puts in this app, and "we kept an anonymised
+    // copy" is not an answer somebody who deleted their account would accept.
+    setRows({
+      receipts: [{ id: 3, visibility: "PRIVATE", semanticType: "DREAM" }],
+      receiptReports: [{ id: 3 }],
+    });
+    const outcome = await deleteAccount(7);
+    expect(writesTo("receipts").some((w) => w.op === "delete")).toBe(true);
+    expect(outcome).toMatchObject({ deletedDreams: 1 });
+  });
+
+  it("delete a dream whose visibility somehow says PUBLIC", async () => {
+    // Dreams are clamped private at write time, so this should be impossible.
+    // Deletion is irreversible and checks rather than assumes: the rule is
+    // "deleted with the account regardless of previous public status".
+    setRows({ receipts: [{ id: 3, visibility: "PUBLIC", semanticType: "DREAM" }] });
+    const outcome = await deleteAccount(7);
+    expect(outcome).toMatchObject({ deletedDreams: 1, deletedPrivateReceipts: 1 });
+  });
+
+  it("still anonymise an ordinary public receipt alongside a deleted dream", async () => {
+    setRows({
+      receipts: [
+        { id: 1, visibility: "PUBLIC", semanticType: "PREDICTION" },
+        { id: 3, visibility: "PRIVATE", semanticType: "DREAM" },
+      ],
+    });
+    const outcome = await deleteAccount(7);
+    expect(outcome).toMatchObject({ deletedDreams: 1, deletedPrivateReceipts: 1, anonymizedReceipts: 1 });
+    expect(writesTo("receipts").some((w) => w.op === "update" && w.values?.userId === null)).toBe(true);
+  });
+
+  it("count a dream once, not twice, when it is private as well", async () => {
+    setRows({ receipts: [{ id: 3, visibility: "PRIVATE", semanticType: "DREAM" }] });
+    const outcome = await deleteAccount(7);
+    expect(outcome).toMatchObject({ deletedPrivateReceipts: 1, deletedDreams: 1 });
+  });
+
+  it("report no dreams when the account had none", async () => {
+    const outcome = await deleteAccount(7);
+    expect(outcome).toMatchObject({ deletedDreams: 0 });
+  });
+
   it("skip the cleanup entirely when the account had none", async () => {
     setRows({ receipts: [{ id: 1, visibility: "PUBLIC" }] });
     await deleteAccount(7);

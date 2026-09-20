@@ -75,10 +75,13 @@ describe("receipts.interact enforces the policy server-side", () => {
     await expect(caller().receipts.interact({ id: 1, type: "SUPPORT" })).rejects.toThrow(/does not take that response/);
   });
 
-  it("accepts only REACT on a fun receipt", async () => {
-    await caller().receipts.interact({ id: 4, type: "REACT" });
-    await expect(caller().receipts.interact({ id: 4, type: "AGREE" })).rejects.toThrow();
-    expect(written.map((w) => w.type)).toEqual(["REACT"]);
+  it("takes agree and disagree on a fun receipt, and no reaction", async () => {
+    // A silly claim is still a claim. The unnamed REACT that FUN used to
+    // offer was a like with a different name, so it is retired: the server
+    // refuses it, and the type answers like a prediction instead.
+    await caller().receipts.interact({ id: 4, type: "AGREE" });
+    await expect(caller().receipts.interact({ id: 4, type: "REACT" })).rejects.toThrow(/does not take that response/);
+    expect(written.map((w) => w.type)).toEqual(["AGREE"]);
   });
 
   it("treats a receipt with no stored type as a prediction", async () => {
