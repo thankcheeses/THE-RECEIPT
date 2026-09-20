@@ -120,7 +120,10 @@ export type ReceiptImageInput = {
   confidence: number;
   status: string;
   createdAt: Date | string;
-  resolutionDate: Date | string;
+  // Null for the types reality never answers. No card for one of those is
+  // generated on a public surface — they cannot be public — but the type has
+  // to admit the null rather than assert it away.
+  resolutionDate: Date | string | null;
   username?: string | null;
   /** Short canonical location, e.g. `the-receipt.app/r/4821`, shown on the card. */
   canonicalLabel?: string | null;
@@ -186,7 +189,7 @@ export async function renderReceiptSvg(receipt: ReceiptImageInput, format: CardF
       el("div", { display: "flex", flexWrap: "wrap", width: "100%" }, [
         field("CATEGORY", receipt.category, scale),
         field("CONFIDENCE", `${receipt.confidence}%`, scale),
-        field(resolved ? "RESOLVED" : "RESOLVES", shortDate(receipt.resolutionDate), scale),
+        field(resolved ? "RESOLVED" : "RESOLVES", receipt.resolutionDate ? shortDate(receipt.resolutionDate) : "—", scale),
         field("CALLER", receipt.username ? `@${receipt.username}` : "ANONYMOUS", scale),
       ]),
       el("div", { display: "flex", justifyContent: "space-between", width: "100%", borderTop: `1px solid ${LINE}`, paddingTop: Math.round(16 * scale) }, [

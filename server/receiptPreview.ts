@@ -48,7 +48,7 @@ type PreviewReceipt = {
   category: string;
   confidence: number;
   status: string;
-  resolutionDate: Date | string;
+  resolutionDate: Date | string | null;
 };
 
 type PreviewUser = { username?: string | null; name?: string | null } | null | undefined;
@@ -62,7 +62,9 @@ export function buildReceiptDescription(receipt: PreviewReceipt, user: PreviewUs
   const resolved = ["RIGHT", "WRONG", "PARTIALLY RIGHT", "TOO EARLY"].includes(receipt.status);
   const verdict = resolved
     ? `${receipt.status}.`
-    : `Resolves ${shortDate(receipt.resolutionDate)}.`;
+    : receipt.resolutionDate
+      ? `Resolves ${shortDate(receipt.resolutionDate)}.`
+      : "Still open.";
   return `${who} was ${receipt.confidence}% sure: “${receipt.prediction}” ${verdict} No edits. No excuses.`;
 }
 

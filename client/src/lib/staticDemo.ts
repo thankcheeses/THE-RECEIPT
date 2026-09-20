@@ -10,7 +10,9 @@
  * real server over httpBatchLink.
  */
 import { CATEGORIES, DAILY_PROMPTS, getTodayPrompt, type Category, type ReceiptStatus } from "@shared/seed";
-import { allowsInteraction, defaultSemanticTypeFor, resolveSemanticType, type InteractionType, type SemanticType } from "@shared/interactionPolicy";
+import { MAX_RESURFACED_PER_DAY, SIMILARITY_THRESHOLD, parseSearchQuery, similarity, yearsAgoToday } from "@shared/archive";
+import { DREAM_MAX_LENGTH, DREAM_MIN_LENGTH, dreamTitleFrom } from "@shared/dream";
+import { allowsInteraction, defaultSemanticTypeFor, isPrivateOnlyType, isResolvableType, resolveSemanticType, type InteractionType, type SemanticType } from "@shared/interactionPolicy";
 import {
   MAX_REPORTS_PER_DAY,
   isPubliclyVisible,
@@ -55,7 +57,8 @@ type DemoReceipt = {
   category: string;
   confidence: number;
   createdAt: Date;
-  resolutionDate: Date;
+  // Null for the types nothing answers (MEMORY, DREAM), same as the server.
+  resolutionDate: Date | null;
   status: ReceiptStatus;
   result: string | null;
   visibility: "PUBLIC" | "PRIVATE";
@@ -63,6 +66,7 @@ type DemoReceipt = {
   dailyChallengeId: number | null;
   resolvedAt: Date | null;
   semanticType: SemanticType | null;
+  title: string | null;
   derivedFromId: number | null;
   moderationStatus: ModerationStatus;
 };
@@ -245,7 +249,15 @@ export const onDemoAuthChange = (handler: () => void) => {
   return () => window.removeEventListener(AUTH_CHANGE_EVENT, handler);
 };
 
-/** Mirrors ensureDailyChallenge(): one seeded prompt per calendar day. */
+/**
+ * One seeded prompt per calendar day.
+ *
+ * The server serves a prompt only once an administrator has approved it. There
+ * is no administrator in a single-browser demo and no queue to work through,
+ * so the demo stands in for that approval with the in-repo prompt catalogue —
+ * which is itself written and reviewed in the repository. It is marked OPEN
+ * for the same reason the rest of the demo exists: so the loop is walkable.
+ */
 const dailyChallenge = () => {
   const prompt = getTodayPrompt();
   const publishDate = new Date();
@@ -329,6 +341,8 @@ const syncDemoResolutionNotifications = (state: DemoState, user: DemoUser) => {
   for (const receipt of state.receipts) {
     if (receipt.userId !== user.id) continue;
     if (!RESOLVABLE_STATUSES.includes(receipt.status)) continue;
+    // A memory or a dream is never due, because nothing ever answers it.
+    if (!isResolvableType(receipt.semanticType) || !receipt.resolutionDate) continue;
     if (new Date(receipt.resolutionDate).getTime() > now) continue;
     const exists = state.notifications.some(
       (item) => item.userId === user.id && item.type === "RECEIPT_DUE" && item.receiptId === receipt.id,
@@ -455,6 +469,12 @@ const handlers: Record<string, Handler> = {
     }),
 
   "daily.get": () => dailyChallenge(),
+  // Admin-only on the server. The demo account is never an administrator, so
+  // these exist to fail the same way rather than to work.
+  "promptReview.queue": () => { throw new Error("You do not have required permission (10002)"); },
+  "promptReview.schedule": () => { throw new Error("You do not have required permission (10002)"); },
+  "promptReview.approve": () => { throw new Error("You do not have required permission (10002)"); },
+  "promptReview.reject": () => { throw new Error("You do not have required permission (10002)"); },
   "daily.status": () => {
     const state = readState();
     const user = requireUser(state);
@@ -482,6 +502,7 @@ const handlers: Record<string, Handler> = {
         confidence: input.confidence,
         createdAt: new Date(),
         resolutionDate: daily.resolutionDate,
+        title: null,
         status: "LOCKED",
         result: null,
         visibility: "PUBLIC",
@@ -546,8 +567,9 @@ const handlers: Record<string, Handler> = {
       .filter((receipt) => isPubliclyVisible(receipt) && ["PENDING", "LOCKED"].includes(receipt.status))
       // Only the author can resolve one, so an author-less receipt never will be.
       .filter((receipt) => receipt.userId !== null)
-      .filter((receipt) => new Date(receipt.resolutionDate).getTime() >= now)
-      .sort((a, b) => new Date(a.resolutionDate).getTime() - new Date(b.resolutionDate).getTime())
+      .filter((receipt) => isResolvableType(receipt.semanticType) && receipt.resolutionDate)
+      .filter((receipt) => new Date(receipt.resolutionDate!).getTime() >= now)
+      .sort((a, b) => new Date(a.resolutionDate!).getTime() - new Date(b.resolutionDate!).getTime())
       .slice(0, limit)
       .map((receipt) => ({ receipt, user: publicUser(state.user) }));
   },
@@ -581,6 +603,101 @@ const handlers: Record<string, Handler> = {
       state.interactions[String(input.id)] = input.type;
       return { counts: { [input.type]: 1 }, mine: input.type };
     }),
+  // --- The archive -------------------------------------------------------
+  // Same rules as the server: one person's own receipts only, plain text
+  // matching, and no public variant of any of it.
+  "archive.search": (input?: { query?: string; semanticType?: SemanticType; status?: ReceiptStatus; limit?: number }) => {
+    const state = readState();
+    const user = requireUser(state);
+    const terms = parseSearchQuery(input?.query ?? "").map((term) => term.toLowerCase());
+    const items = forUser(state, user.id)
+      .filter((receipt) => !input?.semanticType || receipt.semanticType === input.semanticType)
+      .filter((receipt) => !input?.status || receipt.status === input.status)
+      .filter((receipt) =>
+        terms.every((term) =>
+          `${receipt.prediction} ${receipt.title ?? ""} ${receipt.result ?? ""}`.toLowerCase().includes(term),
+        ),
+      )
+      .slice(0, input?.limit ?? 20);
+    return { items, nextCursor: null as number | null };
+  },
+  "archive.summary": () => {
+    const state = readState();
+    const mine = forUser(state, requireUser(state).id);
+    const byType = new Map<string, number>();
+    for (const receipt of mine) {
+      const key = receipt.semanticType ?? "PREDICTION";
+      byType.set(key, (byType.get(key) ?? 0) + 1);
+    }
+    return {
+      total: mine.length,
+      byType: Array.from(byType.entries()).map(([semanticType, total]) => ({ semanticType, total })),
+      maxPerDay: MAX_RESURFACED_PER_DAY,
+    };
+  },
+  "archive.resurfaced": () => {
+    const state = readState();
+    const now = new Date();
+    for (const receipt of forUser(state, requireUser(state).id)) {
+      const years = yearsAgoToday(new Date(receipt.createdAt), now);
+      if (years) return { kind: "ANNIVERSARY" as const, years, receipt, similarTo: null };
+    }
+    return null;
+  },
+  "archive.similar": (input: { text: string; excludeId?: number }) => {
+    const state = readState();
+    if (!input.text.trim()) return null;
+    let best: { receipt: DemoReceipt; score: number } | null = null;
+    for (const receipt of forUser(state, requireUser(state).id)) {
+      // Dreams are never offered as a precedent for a waking claim.
+      if (receipt.semanticType === "DREAM" || receipt.id === input.excludeId) continue;
+      const score = similarity(input.text, receipt.prediction);
+      if (score >= SIMILARITY_THRESHOLD && (!best || score > best.score)) best = { receipt, score };
+    }
+    return best && { kind: "SIMILAR" as const, score: best.score, receipt: best.receipt, years: null };
+  },
+
+  // --- Dreams ------------------------------------------------------------
+  "dreams.capture": (input: { transcript: string; title?: string }) =>
+    mutate((state) => {
+      const user = requireUser(state);
+      const transcript = input.transcript.trim();
+      if (transcript.length < DREAM_MIN_LENGTH) throw new Error("A little more than that.");
+      if (transcript.length > DREAM_MAX_LENGTH) throw new Error("That is longer than a dream can be kept.");
+      const receipt: DemoReceipt = {
+        id: state.nextReceiptId++,
+        userId: user.id,
+        prediction: transcript,
+        title: input.title?.trim() || dreamTitleFrom(transcript),
+        category: "LIFE",
+        confidence: 0,
+        createdAt: new Date(),
+        resolutionDate: null,
+        status: "PENDING",
+        result: null,
+        // Never read from input. There is no path by which a dream is public.
+        visibility: "PRIVATE",
+        challengeUserId: null,
+        dailyChallengeId: null,
+        resolvedAt: null,
+        semanticType: "DREAM",
+        derivedFromId: null,
+        moderationStatus: "VISIBLE",
+      };
+      state.receipts.push(receipt);
+      // Length only — no part of the transcript reaches analytics.
+      state.events.push({ event: "dream_captured", properties: { receiptId: receipt.id, length: transcript.length }, at: new Date() });
+      return receipt;
+    }),
+  "dreams.rename": (input: { id: number; title: string }) =>
+    mutate((state) => {
+      const user = requireUser(state);
+      const receipt = state.receipts.find((item) => item.id === input.id);
+      if (!receipt || receipt.userId !== user.id) throw new Error("You can only rename your own dreams.");
+      if (receipt.semanticType !== "DREAM") throw new Error("Only a dream can be renamed.");
+      receipt.title = input.title.trim();
+      return receipt;
+    }),
   "receipts.mine": () => {
     const state = readState();
     return forUser(state, requireUser(state).id);
@@ -588,7 +705,7 @@ const handlers: Record<string, Handler> = {
   "receipts.create": (input: {
     prediction: string;
     category: Category;
-    resolutionDate: Date;
+    resolutionDate?: Date;
     confidence: number;
     visibility: "PUBLIC" | "PRIVATE";
     challengeUsername?: string;
@@ -601,8 +718,14 @@ const handlers: Record<string, Handler> = {
       if (prediction.length < 8) throw new Error("Say a bit more — at least 8 characters.");
       if (prediction.length > 280) throw new Error("Keep it under 280 characters.");
       if (!CATEGORIES.includes(input.category)) throw new Error("Pick a category.");
-      const resolutionDate = new Date(input.resolutionDate);
-      if (resolutionDate.getTime() <= Date.now()) throw new Error("Resolution date must be in the future.");
+      const semanticType = input.semanticType ?? defaultSemanticTypeFor(input.category);
+      // Mirrors the server: only the types reality answers carry a date, and
+      // a private-only type is clamped rather than trusted.
+      const resolvable = isResolvableType(semanticType);
+      if (resolvable && !input.resolutionDate) throw new Error("Pick the date this can be checked.");
+      const resolutionDate = resolvable ? new Date(input.resolutionDate!) : null;
+      if (resolutionDate && resolutionDate.getTime() <= Date.now()) throw new Error("Resolution date must be in the future.");
+      const visibility = isPrivateOnlyType(semanticType) ? "PRIVATE" : input.visibility;
       if (input.challengeUsername && input.challengeUsername.toLowerCase() === (user.username ?? "").toLowerCase()) {
         throw new Error("Challenge someone else, not yourself.");
       }
@@ -616,11 +739,12 @@ const handlers: Record<string, Handler> = {
         resolutionDate,
         status: "PENDING",
         result: null,
-        visibility: input.visibility,
+        visibility,
         challengeUserId: input.challengeUsername ? -1 : null,
         dailyChallengeId: null,
         resolvedAt: null,
-        semanticType: input.semanticType ?? defaultSemanticTypeFor(input.category),
+        semanticType,
+        title: null,
         // Only a public parent can be linked, matching the server.
         derivedFromId: input.derivedFromId && state.receipts.some((item) => item.id === input.derivedFromId && isPubliclyVisible(item))
           ? input.derivedFromId
@@ -656,7 +780,7 @@ const handlers: Record<string, Handler> = {
         });
         state.events.push({ event: "challenge_created", properties: { challengeId }, at: new Date() });
       }
-      state.events.push({ event: "receipt_created", properties: { receiptId: receipt.id, category: input.category, confidence: input.confidence, visibility: input.visibility }, at: new Date() });
+      state.events.push({ event: "receipt_created", properties: { receiptId: receipt.id, category: input.category, confidence: input.confidence, visibility }, at: new Date() });
       return receipt;
     }),
   "receipts.resolve": (input: { id: number; result: ReceiptStatus; note?: string }) =>
@@ -665,6 +789,9 @@ const handlers: Record<string, Handler> = {
       const receipt = state.receipts.find((item) => item.id === input.id);
       if (!receipt || receipt.userId !== user.id) throw new Error("You can only resolve your own receipts.");
       if (!["PENDING", "LOCKED"].includes(receipt.status)) throw new Error("This receipt is already resolved.");
+      if (!isResolvableType(receipt.semanticType) || !receipt.resolutionDate) {
+        throw new Error(`A ${resolveSemanticType(receipt.semanticType).toLowerCase()} receipt isn't right or wrong. It's just kept.`);
+      }
       // Mirrors canResolveAt() in server/db.ts: a receipt cannot be judged
       // before the date it declared.
       if (Date.now() < new Date(receipt.resolutionDate).getTime()) {
@@ -725,9 +852,15 @@ const handlers: Record<string, Handler> = {
       // Private receipts go unless a challenge depends on them; public ones
       // stay, detached. Mirrors deleteAccount() in server/db.ts.
       const anchored = new Set(state.challenges.map((challenge) => challenge.receiptId));
-      const deletable = state.receipts
-        .filter((receipt) => receipt.userId === user.id && receipt.visibility === "PRIVATE" && !anchored.has(receipt.id))
-        .map((receipt) => receipt.id);
+      const mine = state.receipts.filter((receipt) => receipt.userId === user.id);
+      // Dreams go unconditionally — never anonymised, never held back by a
+      // dependency. Mirrors the same override in deleteAccount().
+      const dreamIds = mine.filter((receipt) => receipt.semanticType === "DREAM").map((receipt) => receipt.id);
+      const deletable = dreamIds.concat(
+        mine
+          .filter((receipt) => receipt.visibility === "PRIVATE" && !anchored.has(receipt.id) && receipt.semanticType !== "DREAM")
+          .map((receipt) => receipt.id),
+      );
       state.receipts = state.receipts.filter((receipt) => !deletable.includes(receipt.id));
       for (const receipt of state.receipts) {
         if (deletable.includes(receipt.derivedFromId ?? -1)) receipt.derivedFromId = null;
@@ -755,6 +888,7 @@ const handlers: Record<string, Handler> = {
       window.dispatchEvent(new Event(AUTH_CHANGE_EVENT));
       return {
         deletedPrivateReceipts: deletable.length,
+        deletedDreams: dreamIds.length,
         anonymizedReceipts: state.receipts.filter((receipt) => receipt.userId === null).length,
         usernameRetired: Boolean(user.username),
       };

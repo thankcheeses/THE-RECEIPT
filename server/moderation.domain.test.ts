@@ -27,18 +27,27 @@ describe("publicReceiptWhere", () => {
     expect(sql).toContain("`visibility`");
     expect(sql).toContain("`moderationStatus`");
     expect(sql).toContain("and");
-    expect(params).toEqual(["PUBLIC", "VISIBLE"]);
+    expect(params).toEqual(["PUBLIC", "VISIBLE", "DREAM"]);
+  });
+
+  it("excludes dreams, whatever their visibility column says", () => {
+    // A dream is clamped to PRIVATE when it is written, so this is the second
+    // lock on the same door: a row flipped to PUBLIC by a bug or by hand still
+    // cannot reach the feed, a profile, a shared link or a generated card.
+    const { sql, params } = compile(publicReceiptWhere());
+    expect(sql).toContain("`semanticType`");
+    expect(params).toContain("DREAM");
   });
 
   it("keeps both conditions when a caller adds its own", () => {
     const { sql, params } = compile(publicReceiptWhere(eq(receipts.category, "SPORTS")));
     expect(sql).toContain("`moderationStatus`");
-    expect(params).toEqual(["PUBLIC", "VISIBLE", "SPORTS"]);
+    expect(params).toEqual(["PUBLIC", "VISIBLE", "DREAM", "SPORTS"]);
   });
 
   it("ignores absent optional conditions rather than dropping the rule", () => {
     const { params } = compile(publicReceiptWhere(undefined, eq(receipts.id, 4)));
-    expect(params).toEqual(["PUBLIC", "VISIBLE", 4]);
+    expect(params).toEqual(["PUBLIC", "VISIBLE", "DREAM", 4]);
   });
 });
 

@@ -12,9 +12,13 @@ There is no money, betting, or wagering in the product.
 
 ## Features
 
-- **Daily challenge** — one prompt a day from a catalog of 50+ prompts across nine categories, with a YES/NO answer and a confidence level.
+- **Daily challenge** — one prompt a day, with a YES/NO answer and a confidence level. A prompt is served only once an administrator has approved it; there is no auto-publish path, and a day with nothing approved shows an honest empty state.
 - **Custom receipts** — free-text predictions with a category, resolution date, confidence, and public/private visibility.
-- **Kinds of receipt** — the author says whether a receipt is a Prediction, Goal, Personal, or Fun. That choice decides what other people can do with it: you can disagree with a claim about the world, but a goal gets support instead.
+- **Kinds of receipt** — the author says whether a receipt is a Prediction, Goal, Personal, Fun or Memory. That choice decides what other people can do with it: you can disagree with a claim about the world, but a goal gets support instead, and a memory takes no response at all.
+- **Memory** — "what will this mean later". A memory carries no resolution date and is never resolved RIGHT or WRONG, because the existing resolution vocabulary cannot describe what a memory came to mean. It is locked, kept, and handed back by the archive.
+- **Dream** — captured by voice from a cold open, transcribed in the browser, and always private. The audio is never uploaded. Dreams take no interactions, never appear on any public surface, are never interpreted, and are deleted outright with the account.
+- **Archive** — `/archive` searches everything you have written: plain text matching over the receipt, its title and any resolution note, filterable by type. It is scoped to one author and has no public variant.
+- **Resurfacing** — at most one receipt a day, handed back on its anniversary. It states the date and what you wrote, and claims nothing beyond that.
 - **Me too** — writing your own receipt after someone else's. It is not a reaction: it creates a real, independently locked receipt that remembers which one it followed.
 - **Resolving soon** — open public receipts ordered by how close they are to their resolution date.
 - **Immutable records** — no edit path exists; the only post-creation change is resolution by the owner.
@@ -27,7 +31,8 @@ There is no money, betting, or wagering in the product.
 - **Notifications** — in-app bell with unread count for challenges received and accepted.
 - **Profiles** — accuracy, category breakdown, confidence calibration, biggest call, and biggest miss.
 - **Reporting and moderation** — signed-in people can report a public receipt; administrators can take one off public surfaces. A takedown hides, it never deletes.
-- **Analytics** — a small closed event vocabulary covering signup, receipt creation, sharing, and resolution.
+- **Analytics** — a small closed event vocabulary. Contents are never recorded: a dream capture logs only its length, and an archive search logs the result count, never the term.
+- **Privacy and Terms** — `/privacy` and `/terms`, written against the code and marked as drafts because no lawyer has read them.
 - **Sharing** — one interface with platform adapters: OS share sheet, copy link, and composer intents for X, Bluesky, WhatsApp, Reddit and Facebook.
 
 ## Interaction policy
@@ -75,7 +80,10 @@ A receipt cannot be edited or deleted — not by its author, and not by an admin
 | `/u/:username` | Public profile: a caller's public receipts and record |
 | `/challenges` | Authenticated challenge list |
 | `/challenge/:id` | Head-to-head challenge detail and acceptance |
-| `/leaderboard` | Leaderboard views (currently demo-seeded and labeled as such in the UI) |
+| `/archive` | Your own archive: search and filter everything you have written |
+| `/dream` | Dream capture — microphone opens on arrival, always private |
+| `/privacy` | Privacy policy (draft) |
+| `/terms` | Terms (draft) |
 | `/moderation` | Admin-only report queue and takedown controls |
 | `/profile` | Authenticated profile and statistics |
 
@@ -111,11 +119,18 @@ The schema is in `drizzle/schema.ts`; generated SQL migrations are in `drizzle/`
 
 ```bash
 pnpm drizzle-kit generate   # generate SQL from a schema change
+pnpm db:preflight           # read-only checks before applying anything
 pnpm drizzle-kit migrate    # apply migrations
-pnpm db:push                # both, in sequence
+pnpm db:push                # generate + migrate, in sequence
 ```
 
 Review generated SQL before applying it to a database that holds real data.
+
+`pnpm db:preflight` never writes. It reports whether the pending migrations can
+be applied safely, and exits non-zero when something needs a person. The check
+that matters is before **0007**, which adds a UNIQUE index on `users.username`:
+if two accounts hold the same handle, MySQL refuses the index, and deciding
+whose handle survives is a product decision, not a migration's.
 
 ## Sharing
 
