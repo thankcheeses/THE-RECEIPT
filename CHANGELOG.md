@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Fixed the GitHub Pages deployment.** The live demo was serving a Jekyll-rendered `README.md` instead of the application: the repository's Pages source was set to "Deploy from a branch", so GitHub's own `pages-build-deployment` ran on every push to `main` and published over this workflow's artifact seconds after it landed. Every job in every workflow reported success throughout. The repository setting is the fix; the workflow now refuses to report success when it has not been made.
+- Added `scripts/verifyStaticBuild.mjs`, run in the build job before the artifact is uploaded. It opens the build output and checks the SPA fallback, `.nojekyll`, the base path on every asset URL, that every referenced file exists, that no `%VITE_%` placeholder survived, and that the bundle is the static-demo build rather than a husk or the server build. 17 tests.
+- Added `scripts/verifyPagesDeployment.mjs` and a `verify` job that runs after deployment. It fetches the published URL and fails when what is served is not this application, naming the Jekyll misconfiguration specifically.
+
 - Receipt cards render in three formats — 1200×630 link, 1080×1920 story, 1080×1080 square — requested with `?format=` on `/r/:id/image.png`. The layout scales to each rather than being cropped.
 - Share destinations are grouped by platform, so Instagram can offer both a story and a feed card. Instagram and TikTok get correctly shaped cards rather than a fake posting integration.
 

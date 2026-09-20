@@ -210,7 +210,33 @@ pnpm build:static   # writes dist/public with base path /THE-RECEIPT/
 
 The script copies `index.html` to `404.html` so deep links such as `/THE-RECEIPT/daily` resolve, and writes `.nojekyll`. Override the base path with `VITE_BASE_PATH=/ pnpm build:static` when serving from a domain root.
 
-To enable Pages on a fork: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+### The Pages source must be "GitHub Actions"
+
+**Settings → Pages → Build and deployment → Source: GitHub Actions.** This is
+not optional and it is not cosmetic.
+
+If the source is left as "Deploy from a branch", GitHub runs its *own* Jekyll
+build on every push to `main` — `actions/jekyll-build-pages` over the
+repository root — and publishes the result. That build renders `README.md`
+through the Primer theme into `index.html`, copies the source tree alongside
+it, and deploys a few seconds *after* this workflow's artifact, replacing the
+application with a themed README. Nothing fails: the Pages workflow, the
+Jekyll workflow and CI all report success while the live site is wrong. This
+happened on 20 September 2026.
+
+Two checks now make that state visible instead of silent:
+
+| Check | Where | What it catches |
+| --- | --- | --- |
+| `scripts/verifyStaticBuild.mjs` | build job, before upload | An artifact that cannot work: missing `404.html` or `.nojekyll`, asset URLs without the base path, a referenced file that is not in the artifact, an unresolved `%VITE_%` placeholder, a bundle too small to be the app, a bundle missing the static-demo store or still carrying `/api/trpc`. |
+| `scripts/verifyPagesDeployment.mjs` | `verify` job, after deploy | A deployment that did not take: the live URL not serving this application, a bundle that 404s or comes back as HTML, a broken SPA fallback. It names the Jekyll case explicitly, because that is the one that looks like success. |
+
+Both run in `.github/workflows/deploy-pages.yml` and both are runnable by hand:
+
+```bash
+node scripts/verifyStaticBuild.mjs dist/public /THE-RECEIPT/
+node scripts/verifyPagesDeployment.mjs https://thankcheeses.github.io/THE-RECEIPT/
+```
 
 ## Deployment
 
