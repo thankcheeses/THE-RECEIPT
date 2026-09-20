@@ -24,7 +24,7 @@ import { type CardFormat } from "@shared/cardFormats";
 import { MAX_REPORT_DETAIL, MODERATION_ACTION_COPY, MODERATION_ACTIONS, REPORT_REASONS, REPORT_REASON_COPY, resolveModerationStatus, type ModerationAction, type ReportReason, type ReportStatus } from "@shared/moderation";
 import { DELETED_AUTHOR_LABEL, authorLabel, isAuthorDeleted, isUnresolvable } from "@shared/accountDeletion";
 import { IS_STATIC_DEMO } from "@/lib/staticDemo";
-import { AGE_POSITION, LEGAL_STATUS, PRIVACY_POLICY, TERMS, type LegalDocument } from "@shared/legal";
+import { AGE_NOTICE, LEGAL_STATUS, PRIVACY_POLICY, TERMS, type LegalDocument } from "@shared/legal";
 
 const dateLabel = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "—";
 const shortDate = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" }) : "—";
@@ -86,7 +86,7 @@ function Header() {
 }
 
 function Page({ children, eyebrow, title, description, actions }: { children: React.ReactNode; eyebrow?: string; title?: string; description?: string; actions?: React.ReactNode }) {
-  return <><Header /><main className="page-shell">{title && <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{actions && <div className="heading-actions">{actions}</div>}</div>}{children}</main><footer className="site-footer"><span>PUT IT ON THE RECORD.</span><span>NO EDITS. NO EXCUSES.</span><Link href="/privacy" className="footer-contact">PRIVACY</Link><Link href="/terms" className="footer-contact">TERMS</Link>{ABUSE_CONTACT && <a className="footer-contact" href={`mailto:${ABUSE_CONTACT}`}>REPORT ABUSE</a>}</footer></>;
+  return <><Header /><main className="page-shell">{title && <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description && <p>{description}</p>}</div>{actions && <div className="heading-actions">{actions}</div>}</div>}{children}</main><footer className="site-footer"><span>PUT IT ON THE RECORD.</span><span className="footer-age">{AGE_NOTICE}</span><Link href="/privacy" className="footer-contact">PRIVACY</Link><Link href="/terms" className="footer-contact">TERMS</Link>{ABUSE_CONTACT && <a className="footer-contact" href={`mailto:${ABUSE_CONTACT}`}>REPORT ABUSE</a>}</footer></>;
 }
 
 function ButtonLink({ href, children, variant = "primary", className = "" }: { href: string; children: React.ReactNode; variant?: "primary" | "secondary" | "ghost"; className?: string }) {
@@ -855,7 +855,7 @@ function Archive() {
 
   if (!isAuthenticated) {
     return <Page eyebrow="THE ARCHIVE" title="Your own record." description="Everything you've written, and a way back to it.">
-      <div className="empty-state"><p>Sign in to search your archive.</p><button className="button button-dark" onClick={() => startLogin()}>SIGN IN</button></div>
+      <div className="empty-state"><p>Sign in to search your archive.</p><button className="button button-dark" onClick={() => startLogin()}>SIGN IN</button><p className="muted small">{AGE_NOTICE}</p></div>
     </Page>;
   }
 
@@ -995,7 +995,7 @@ function DreamCapture() {
 
   if (!isAuthenticated) {
     return <Page eyebrow="DREAM" title="I just woke up." description="Sign in first — a dream is private, and private needs an account.">
-      <div className="empty-state"><button className="button button-dark" onClick={() => startLogin()}>SIGN IN</button></div>
+      <div className="empty-state"><button className="button button-dark" onClick={() => startLogin()}>SIGN IN</button><p className="muted small">{AGE_NOTICE}</p></div>
     </Page>;
   }
 
@@ -1068,10 +1068,6 @@ function LegalPage({ document }: { document: LegalDocument }) {
         <h2>{section.heading}</h2>
         {section.body.map((line, index) => <p key={index}>{line}</p>)}
       </section>)}
-      <section className="legal-section">
-        <h2>Age</h2>
-        <p>{AGE_POSITION}</p>
-      </section>
       {ABUSE_CONTACT && <p className="legal-contact">Questions, or a legal notice: <a href={`mailto:${ABUSE_CONTACT}`}>{ABUSE_CONTACT}</a></p>}
     </div>
   </Page>;

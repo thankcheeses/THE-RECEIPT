@@ -96,6 +96,16 @@ const POLICY: Record<SemanticType, readonly InteractionType[]> = {
  * vocabulary cannot describe what either of them came to mean, so they are not
  * forced through it — they are locked, kept, and resurfaced instead. See
  * `isResolvableType` below for the single check every resolution path uses.
+ *
+ * On MEMORY having no terminal state at all: that was looked at deliberately
+ * and left alone. RIGHT / WRONG / PARTIALLY RIGHT / TOO EARLY is the whole
+ * vocabulary this product has, and exactly one of the four (TOO EARLY) could
+ * honestly be applied to a memory. Inventing a fifth — REMEMBERED, MEANT
+ * SOMETHING, CHANGED — would be adding a word nobody has defined in order to
+ * fill a column, and the archive already does the job a terminal state would
+ * be reaching for: a memory comes back on its anniversary, which is what
+ * "what will this mean later" actually cashes out to. If a real vocabulary
+ * for this ever exists, it arrives as a product decision, not as a default.
  */
 const RESOLVABLE_TYPES: readonly SemanticType[] = ["PREDICTION", "GOAL", "PERSONAL", "FUN"];
 

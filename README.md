@@ -44,11 +44,35 @@ What a receipt offers depends on what kind of statement it is, not on its catego
 | Prediction | I agree · I disagree | Me too · Share |
 | Goal | Support | Me too · Share |
 | Personal | Support | Me too · Share |
-| Fun | React | Me too · Share |
+| Fun | I agree · I disagree | Me too · Share |
+| Memory | — | Me too · Share |
+| Dream | — | — |
+
+`REACT` is retired. Fun receipts used to offer a single unnamed reaction, which was a like with a different name; a named reaction vocabulary would have been the same thing with more buttons. A silly claim is still a claim, so Fun now answers like a prediction. The `REACT` type stays in the enum and in the database because rows already recorded under it are responses real people made, and they are still counted and displayed — nothing new is written under it.
+
+A memory takes no response: there is nothing to agree or disagree with, and "support" would answer a question nobody asked. A dream takes none either, and that is structural rather than cosmetic — the server refuses all four, so no surface can add one later by accident.
 
 Support and agreement are stored as distinct interaction types. "147 people support this goal" and "147 people agree this will happen" are different facts, and merging them would lose the difference permanently.
 
 Categories and kinds are independent: one category holds several kinds. A category only suggests a starting point, and the author's choice is what is stored.
+
+## Age, privacy and terms
+
+THE RECEIPT has a product age floor of **13**. It is stated in the footer, at
+every point that invites somebody to make an account, and in both legal pages.
+Nothing verifies it: no date of birth is collected, and adding a verification
+system to police a rule we need that data for nowhere else would mean holding
+more about people, not less.
+
+That floor is a rule this product enforces. It is **not** a claim that the
+product is COPPA compliant, that COPPA does not apply, or that any other
+regime is satisfied. No such assessment has been done.
+
+`/privacy` and `/terms` are written against this code, sentence by sentence,
+and are **marked as drafts in the product** because no lawyer has read them.
+They deliberately contain no compliance claim, no certification, no audit
+claim and no security guarantee. `shared/legal.test.ts` fails if any of those
+phrases appears, so adding one means deleting a test on the way.
 
 ## Reporting and moderation
 
