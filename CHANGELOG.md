@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Removed six workflow templates added from GitHub's suggested-workflow gallery. Two of them published to GitHub Pages on every push to `main` — one building Jekyll over the repository root, one uploading `path: '.'`, the whole source tree — which recreated the deployment incident from inside the repository now that the Pages source is "GitHub Actions". The other four (webpack, Jekyll CI, npm publish, Azure Functions with its `your-app-name` placeholder) fail on every push against a project that builds with Vite and ships no package.
+- Added `scripts/workflows.test.ts`: exactly one workflow may call `deploy-pages` or `upload-pages-artifact`, none may invoke Jekyll, upload the repository root, build with webpack, publish to a package registry, or deploy to an unconfigured host. Comments are stripped before matching, so `deploy-pages.yml` can keep explaining the incident without tripping its own guard.
+
 - The Pages `verify` job no longer stops at the configuration check. Its first real run reported `build_type: legacy` and exited, which skipped the live fetch — so the log could say the setting was wrong but not say what a visitor was being served. Both checks now always run and the job fails if either did.
 - `verifyPagesDeployment.mjs` now classifies what it received — THE RECEIPT application, stale THE RECEIPT deployment, old Jekyll/README deployment, GitHub Pages 404, GitHub Pages error, other — and prints the status, content type, byte count and first 700 characters of the body on every run, passing or failing. Staleness is detected by comparing against the entry bundle this build produced, which the build job now exposes as an output. 11 tests.
 - The `verify` job also prints the full Pages configuration and the latest legacy Pages build, so the evidence for a misconfiguration is in the log rather than something to go and look up.
