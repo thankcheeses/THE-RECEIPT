@@ -67,8 +67,8 @@ function Header() {
   const { isAuthenticated, user, logout } = useAuth();
   const [, navigate] = useLocation();
   return <header className="site-header">
-    <Link href="/" className="brand"><span className="brand-mark">R</span><span>THE RECEIPT</span></Link>
-    <nav className={`main-nav ${menuOpen ? "open" : ""}`}>
+    <Link href="/" className="brand" onClick={() => setMenuOpen(false)}><span className="brand-mark">R</span><span>THE RECEIPT</span></Link>
+    <nav id="mobile-menu" className={`main-nav ${menuOpen ? "open" : ""}`}>
       <Link href="/daily" onClick={() => setMenuOpen(false)}>Today</Link>
       <Link href="/feed" onClick={() => setMenuOpen(false)}>Feed</Link>
       <Link href="/receipts" onClick={() => setMenuOpen(false)}>My receipts</Link>
@@ -80,7 +80,7 @@ function Header() {
     <div className="header-actions">
       <NotificationBell />
       {isAuthenticated ? <button className="avatar-button" onClick={() => navigate("/profile")} aria-label="Open profile">{(user?.name || "R").slice(0, 1).toUpperCase()}</button> : <button className="button button-ghost button-small" onClick={() => startLogin()}>SIGN IN</button>}
-      <button className="menu-button" onClick={() => setMenuOpen((value) => !value)} aria-label="Toggle menu"><Menu size={20} /></button>
+      <button className="menu-button" onClick={() => setMenuOpen((value) => !value)} aria-expanded={menuOpen} aria-controls="mobile-menu" aria-label={menuOpen ? "Close menu" : "Open menu"}>{menuOpen ? <X size={20} /> : <Menu size={20} />}</button>
     </div>
   </header>;
 }
