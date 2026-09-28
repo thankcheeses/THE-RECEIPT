@@ -47,11 +47,21 @@ export async function setupVite(app: Express, server: Server) {
   });
 }
 
+/**
+ * Where the built client lives.
+ *
+ * Exported because the readiness check needs the same answer serveStatic uses;
+ * two copies of this expression would drift and readiness would start
+ * reporting on a directory the server does not serve from.
+ */
+export function staticDistPath(): string {
+  return process.env.NODE_ENV === "development"
+    ? path.resolve(import.meta.dirname, "../..", "dist", "public")
+    : path.resolve(import.meta.dirname, "public");
+}
+
 export function serveStatic(app: Express) {
-  const distPath =
-    process.env.NODE_ENV === "development"
-      ? path.resolve(import.meta.dirname, "../..", "dist", "public")
-      : path.resolve(import.meta.dirname, "public");
+  const distPath = staticDistPath();
   if (!fs.existsSync(distPath)) {
     console.error(
       `Could not find the build directory: ${distPath}, make sure to build the client first`
