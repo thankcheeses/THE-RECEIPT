@@ -9,6 +9,7 @@ import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { registerHealthRoutes, resolvePort } from "./deployment";
 import { registerReceiptPreview } from "../receiptPreview";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -36,6 +37,9 @@ async function startServer() {
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  // Before serveStatic, whose `app.use("*")` fallback would answer these with
+  // index.html and make every health check look like a healthy 200.
+  registerHealthRoutes(app);
   registerStorageProxy(app);
   registerOAuthRoutes(app);
   // tRPC API
@@ -56,16 +60,37 @@ async function startServer() {
     serveStatic(app);
   }
 
-  const preferredPort = parseInt(process.env.PORT || "3000");
-  const port = await findAvailablePort(preferredPort);
+  const { port: preferredPort, mayScan } = resolvePort(process.env);
 
+  // Production binds exactly what the platform assigned. Scanning upward would
+  // leave the process listening on a port nothing routes to, which presents as
+  // a failing health check with no hint that the port is the reason.
+  if (!mayScan) {
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      console.error(
+        `Could not bind port ${preferredPort}: ${error.code ?? error.message}. ` +
+          `Refusing to listen elsewhere — the platform routes to ${preferredPort} only.`,
+      );
+      process.exit(1);
+    });
+    server.listen(preferredPort, () => {
+      console.log(`Listening on port ${preferredPort} (production). Readiness: /readyz`);
+    });
+    return;
+  }
+
+  const port = await findAvailablePort(preferredPort);
   if (port !== preferredPort) {
     console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
   }
-
   server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}/`);
   });
 }
 
-startServer().catch(console.error);
+startServer().catch((error) => {
+  // Exiting non-zero is what makes a platform report a failed deploy instead of
+  // a running container that answers nothing.
+  console.error("Server failed to start:", error);
+  process.exit(1);
+});
