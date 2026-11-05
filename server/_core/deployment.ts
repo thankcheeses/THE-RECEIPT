@@ -18,11 +18,16 @@
  *      TCP port open". That cannot distinguish a process that is up from an
  *      application that can actually answer.
  *
- *   3. `getDb()` returns null when DATABASE_URL is unset and swallows
- *      connection failures with a console.warn. The server therefore boots
- *      perfectly happily with no database, serves the client shell, and fails
- *      every single action at runtime with nothing on the server side saying
- *      why.
+ *   3. `getDb()` returns null when DATABASE_URL is unset. Its try/catch wraps
+ *      only `drizzle(url)` — mysql2 pool construction, which does not open a
+ *      connection — so an unreachable database is not caught there at all; it
+ *      surfaces later, at query time. Either way the server boots perfectly
+ *      happily with no working database and serves the client shell, while
+ *      data-dependent calls fail or quietly return nothing, with no server-side
+ *      signal saying why. (An earlier version of this comment said getDb
+ *      swallows connection failures and that every action fails. Both overstate
+ *      it; the reachability check below is what actually establishes the
+ *      database is there.)
  *
  * Hence the split below. /healthz answers "is this process alive" and touches
  * nothing. /readyz answers "can this process actually serve", which is the
@@ -44,22 +49,36 @@ export type Readiness = {
 /**
  * Resolves the port to bind.
  *
- * Returns the port and whether scanning for a free one is permitted. In
- * production it never is: bind what the platform assigned or fail.
+ * Returns the port and whether scanning for a free one is permitted. Only
+ * development may scan; anywhere else, bind what the platform assigned or fail.
+ *
+ * `mayScan` keys off `NODE_ENV === "development"` rather than
+ * `!== "production"`, and that asymmetry is the whole point. index.ts decides
+ * how to serve the client with `NODE_ENV === "development"`, so with NODE_ENV
+ * unset it serves the built static files. Had this function asked
+ * `!== "production"` instead, that same unset NODE_ENV would have served static
+ * files *and* scanned upward off the assigned port — production behaviour on one
+ * line, development behaviour on the other, which is exactly the silent
+ * misdeployment this module exists to prevent. The two predicates must name the
+ * same environment, so both name development.
+ *
+ * `env` is typed as a string record so `process.env` can be passed directly:
+ * NodeJS.ProcessEnv against an all-optional literal type trips TypeScript's
+ * weak-type check (TS2559) and fails `pnpm check`.
  *
  * @throws when PORT is set to something that is not a usable port, because
  *   defaulting to 3000 there would hide a misconfigured deployment behind a
  *   server that appears to start correctly.
  */
-export function resolvePort(env: { PORT?: string; NODE_ENV?: string }): {
+export function resolvePort(env: Readonly<Record<string, string | undefined>>): {
   port: number;
   mayScan: boolean;
 } {
   const raw = env.PORT?.trim();
-  const isProduction = env.NODE_ENV === "production";
+  const isDevelopment = env.NODE_ENV === "development";
 
   if (raw === undefined || raw === "") {
-    return { port: 3000, mayScan: !isProduction };
+    return { port: 3000, mayScan: isDevelopment };
   }
 
   const port = Number(raw);
@@ -67,7 +86,7 @@ export function resolvePort(env: { PORT?: string; NODE_ENV?: string }): {
     throw new Error(`PORT is ${JSON.stringify(raw)}, which is not a port number between 1 and 65535.`);
   }
 
-  return { port, mayScan: !isProduction };
+  return { port, mayScan: isDevelopment };
 }
 
 /**
@@ -84,11 +103,17 @@ export async function readiness(
     ping?: () => Promise<void>;
     distPath?: string;
     exists?: (path: string) => boolean;
+    servesStaticBuild?: boolean;
   } = {},
 ): Promise<Readiness> {
   const databaseUrl = "databaseUrl" in options ? options.databaseUrl : process.env.DATABASE_URL;
   const distPath = options.distPath ?? staticDistPath();
   const exists = options.exists ?? ((path: string) => fs.existsSync(path));
+  // In development Vite serves the client from memory and dist/public does not
+  // exist, so checking for it there reports a missing build on a server that is
+  // serving the application perfectly well — a health endpoint that lies in the
+  // one direction that matters, by naming a cause that is not the cause.
+  const servesStaticBuild = options.servesStaticBuild ?? process.env.NODE_ENV !== "development";
 
   const ping =
     options.ping ??
@@ -110,10 +135,15 @@ export async function readiness(
     }
   }
 
-  const indexHtml = `${distPath}/index.html`;
-  const staticBuild = exists(indexHtml)
-    ? { ok: true, detail: distPath }
-    : { ok: false, detail: `${indexHtml} is missing — run \`pnpm build\` before starting the server.` };
+  let staticBuild: Check;
+  if (!servesStaticBuild) {
+    staticBuild = { ok: true, detail: "not applicable — Vite serves the client in development" };
+  } else {
+    const indexHtml = `${distPath}/index.html`;
+    staticBuild = exists(indexHtml)
+      ? { ok: true, detail: distPath }
+      : { ok: false, detail: `${indexHtml} is missing — run \`pnpm build\` before starting the server.` };
+  }
 
   return { ok: database.ok && staticBuild.ok, checks: { database, staticBuild } };
 }

@@ -11,7 +11,7 @@ import { readiness, resolvePort } from "./_core/deployment";
 
 describe("the port the server binds", () => {
   it("defaults to 3000 when PORT is unset", () => {
-    expect(resolvePort({})).toEqual({ port: 3000, mayScan: true });
+    expect(resolvePort({})).toEqual({ port: 3000, mayScan: false });
   });
 
   it("uses PORT when the platform assigns one", () => {
@@ -27,7 +27,27 @@ describe("the port the server binds", () => {
 
   it("still scans in development, where it is a convenience", () => {
     expect(resolvePort({ PORT: "3000", NODE_ENV: "development" }).mayScan).toBe(true);
-    expect(resolvePort({}).mayScan).toBe(true);
+    expect(resolvePort({ NODE_ENV: "development" }).mayScan).toBe(true);
+  });
+
+  it("does NOT scan when NODE_ENV is unset", () => {
+    // The defect this file shipped with. `mayScan` asked `!== "production"`
+    // while index.ts asks `=== "development"`, so an unset NODE_ENV served the
+    // built static files — production behaviour — while scanning upward off the
+    // assigned port. The container would come up, log a port nothing routes to,
+    // and fail every health check for a reason nothing reported.
+    //
+    // Only development scans. Anything else, including unset, binds exactly.
+    for (const env of [{}, { PORT: "8080" }, { NODE_ENV: "" }, { NODE_ENV: "staging" }, { NODE_ENV: "test" }]) {
+      expect({ env, mayScan: resolvePort(env).mayScan }).toEqual({ env, mayScan: false });
+    }
+  });
+
+  it("accepts process.env directly", () => {
+    // Typed as a string record, not an all-optional literal: NodeJS.ProcessEnv
+    // against the latter trips TypeScript's weak-type check (TS2559), which is
+    // how this file first failed `pnpm check` in CI.
+    expect(() => resolvePort(process.env)).not.toThrow();
   });
 
   it.each(["0", "-1", "70000", "not-a-port", "8080abc", "3000.5"])(
@@ -41,12 +61,17 @@ describe("the port the server binds", () => {
 
   it("treats an empty PORT as unset rather than as an error", () => {
     // Platforms and compose files both produce PORT="" when a value is omitted.
-    expect(resolvePort({ PORT: "" })).toEqual({ port: 3000, mayScan: true });
-    expect(resolvePort({ PORT: "   " })).toEqual({ port: 3000, mayScan: true });
+    const dev = { NODE_ENV: "development" };
+    expect(resolvePort({ PORT: "", ...dev })).toEqual({ port: 3000, mayScan: true });
+    expect(resolvePort({ PORT: "   ", ...dev })).toEqual({ port: 3000, mayScan: true });
+    expect(resolvePort({ PORT: "" })).toEqual({ port: 3000, mayScan: false });
   });
 });
 
-const built = { distPath: "/app/dist/public", exists: () => true };
+// `servesStaticBuild` is pinned rather than left to default, so the suite does
+// not change meaning when it is run with NODE_ENV=development.
+const built = { distPath: "/app/dist/public", exists: () => true, servesStaticBuild: true };
+const serving = { distPath: "/app/dist/public", servesStaticBuild: true };
 const reachable = { ping: async () => undefined };
 
 describe("readiness", () => {
@@ -88,7 +113,7 @@ describe("readiness", () => {
     const result = await readiness({
       databaseUrl: "mysql://host/db",
       ...reachable,
-      distPath: "/app/dist/public",
+      ...serving,
       exists: () => false,
     });
     expect(result.ok).toBe(false);
@@ -100,7 +125,7 @@ describe("readiness", () => {
     await readiness({
       databaseUrl: "mysql://host/db",
       ...reachable,
-      distPath: "/app/dist/public",
+      ...serving,
       exists: (path) => {
         seen.push(path);
         return true;
@@ -110,9 +135,32 @@ describe("readiness", () => {
   });
 
   it("reports both failures at once rather than stopping at the first", async () => {
-    const result = await readiness({ databaseUrl: undefined, distPath: "/app/dist/public", exists: () => false });
+    const result = await readiness({ databaseUrl: undefined, ...serving, exists: () => false });
     expect(result.ok).toBe(false);
     expect(result.checks.database.ok).toBe(false);
     expect(result.checks.staticBuild.ok).toBe(false);
+  });
+
+  it("does not check for a static build in development", async () => {
+    // Vite serves the client from memory in development and dist/public does
+    // not exist, so the original check reported "run `pnpm build`" against a
+    // dev server that was serving the app fine — a health endpoint naming a
+    // cause that is not the cause.
+    const seen: string[] = [];
+    const result = await readiness({
+      databaseUrl: "mysql://host/db",
+      ...reachable,
+      distPath: "/app/dist/public",
+      servesStaticBuild: false,
+      exists: (path) => {
+        seen.push(path);
+        return false;
+      },
+    });
+    expect(result.checks.staticBuild.ok).toBe(true);
+    expect(result.checks.staticBuild.detail).toMatch(/not applicable/);
+    expect(result.ok).toBe(true);
+    // Nothing on disk was consulted at all.
+    expect(seen).toEqual([]);
   });
 });
