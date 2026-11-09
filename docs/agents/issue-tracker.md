@@ -65,9 +65,11 @@ Read it as in **Read an issue** above.
 
 ## Triage labels
 
-The `triage` skill is not installed in this repo, so no triage label vocabulary
-is configured and `docs/agents/triage-labels.md` does not exist. Install
-`triage` and re-run `/setup-matt-pocock-skills` to add one.
+The `triage` skill is installed, and the five canonical roles are mapped at
+their default strings in `docs/agents/triage-labels.md`. Read that file before
+applying a label: four of the five did not exist on the repo when it was
+written, and `gh issue edit --add-label` fails on an unknown label rather than
+creating it. That file carries the `gh label create` commands.
 
 ## Wayfinding operations
 

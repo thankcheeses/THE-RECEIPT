@@ -17,6 +17,12 @@ See `README.md` for setup, `CONTRIBUTING.md` for conventions, and
 Issues live in this repo's GitHub Issues (`thankcheeses/THE-RECEIPT`), via the
 `gh` CLI. See `docs/agents/issue-tracker.md`.
 
+### Triage labels
+
+The five canonical roles at their default strings: `needs-triage`,
+`needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See
+`docs/agents/triage-labels.md`.
+
 ### Domain docs
 
 Single-context: one `GLOSSARY.md` and one `docs/adr/` at the repo root, both
