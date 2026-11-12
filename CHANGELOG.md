@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The landing page no longer shows a hardcoded "NEXT RECEIPT 23:41:08" countdown. That panel now states when today's daily answer resolves, read from the daily challenge. The manifesto's "since today" attribution is gone, and the hero receipt is stamped as the receipt it previews would be: LOCKED for a daily answer, PENDING when there is no daily prompt. The first example receipt, a custom one, is stamped PENDING like every custom receipt.
+- Added a favicon and site-wide Open Graph / Twitter defaults to `client/index.html`. `injectMetaTags` now removes those defaults on `/r/:id` so a public receipt carries one set of tags, its own. 1 test.
+- Removed generator scaffolding nothing used: the example `Home` and `ComponentShowcase` pages, the `ManusDialog`, `AIChatBox`, `Map` and `DashboardLayout` components, the `__manus__` debug collector (which was being published with the Pages build) and its Vite plugins, `server/_core/{llm,map,heartbeat,dataApi}.ts`, the empty `.gitkeep`, and five dependencies only they used (`streamdown`, `@types/google.maps`, `add`, `@builder.io/vite-plugin-jsx-loc`, `vite-plugin-manus-runtime`). `ENVIRONMENT.md` describes its variables without naming a host.
+- The analytics script tag is now stripped from every build where `VITE_ANALYTICS_ENDPOINT` or `VITE_ANALYTICS_WEBSITE_ID` is unset, not only the static one. The server build used to ship a literal `%VITE_ANALYTICS_ENDPOINT%/umami` script src.
+- Toasts now use the project's own colour tokens; the undefined shadcn ones left them with a transparent background.
+- Accessibility: footer text is 11px at 5.2:1 contrast (was 9px at 2.8:1), and the viewport tag no longer blocks pinch zoom.
+- On phones, toasts appear at the top so "Receipt printed." no longer covers the Support and Me too buttons. The profile calibration bar is empty until a receipt has been resolved. The README no longer lists Snapchat, which has no share target.
+
 - Removed six workflow templates added from GitHub's suggested-workflow gallery. Two of them published to GitHub Pages on every push to `main` — one building Jekyll over the repository root, one uploading `path: '.'`, the whole source tree — which recreated the deployment incident from inside the repository now that the Pages source is "GitHub Actions". The other four (webpack, Jekyll CI, npm publish, Azure Functions with its `your-app-name` placeholder) fail on every push against a project that builds with Vite and ships no package.
 - Added `scripts/workflows.test.ts`: exactly one workflow may call `deploy-pages` or `upload-pages-artifact`, none may invoke Jekyll, upload the repository root, build with webpack, publish to a package registry, or deploy to an unconfigured host. Comments are stripped before matching, so `deploy-pages.yml` can keep explaining the incident without tripping its own guard.
 

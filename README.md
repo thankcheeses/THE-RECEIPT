@@ -192,12 +192,12 @@ Cards come in three shapes, requested with `?format=`:
 | Format | Size | Used for |
 | --- | --- | --- |
 | `og` (default) | 1200×630 | Link previews |
-| `story` | 1080×1920 | Instagram, TikTok and Snapchat stories |
+| `story` | 1080×1920 | Instagram and TikTok stories |
 | `square` | 1080×1080 | An Instagram feed post |
 
 The layout adapts rather than being cropped: the taller formats give the receipt a larger share of the canvas, set its contents bigger so a full phone screen does not leave it adrift, and add the tagline in the spare room. An unrecognised `format` is rejected rather than quietly served as a link card.
 
-**The GitHub Pages demo does not do this.** Pages serves static files with no server, so it cannot generate per-receipt tags. Its receipts also live in one browser's `localStorage` and are not reachable by anyone else, so there is nothing for a crawler to preview. The demo keeps the site's generic tags.
+**The GitHub Pages demo does not do this.** Pages serves static files with no server, so it cannot generate per-receipt tags. Its receipts also live in one browser's `localStorage` and are not reachable by anyone else, so there is nothing for a crawler to preview. The demo keeps the site-wide defaults from `client/index.html` — title, description, and Open Graph / Twitter title and description, with no preview image. On the Node app those same defaults are what every page other than a public receipt carries; `/r/:id` replaces them.
 
 ## GitHub Pages demo
 

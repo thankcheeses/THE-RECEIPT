@@ -114,6 +114,20 @@ describe("injectMetaTags", () => {
     expect(out.match(/<title>/g)).toHaveLength(1);
   });
 
+  it("drops the site-wide Open Graph and Twitter defaults rather than duplicating them", () => {
+    const withDefaults = shell.replace(
+      "<title>",
+      `<meta property="og:type" content="website" /><meta property="og:title" content="generic og" /><meta name="twitter:card" content="summary" /><meta name="twitter:title" content="generic twitter" /><title>`,
+    );
+    const out = injectMetaTags(withDefaults, buildReceiptMetaTags(pending, null, "https://example.test/r/4821"));
+    expect(out).not.toContain("generic og");
+    expect(out).not.toContain("generic twitter");
+    expect(out).not.toContain('content="website"');
+    expect(out.match(/property="og:title"/g)).toHaveLength(1);
+    expect(out.match(/property="og:type"/g)).toHaveLength(1);
+    expect(out.match(/name="twitter:card"/g)).toHaveLength(1);
+  });
+
   it("leaves the application shell intact so the same bundle still boots", () => {
     const out = injectMetaTags(shell, "<meta name='x' content='y' />");
     expect(out).toContain('<div id="root"></div>');

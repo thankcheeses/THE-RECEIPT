@@ -117,13 +117,16 @@ export function buildReceiptMetaTags(
 }
 
 /**
- * Replaces the document's existing title/description with receipt-specific tags.
+ * Replaces the document's site-wide title, description and Open Graph /
+ * Twitter defaults with receipt-specific tags, so a crawler never sees two
+ * competing sets.
  * The rest of the shell is untouched, so the same bundle boots as always.
  */
 export function injectMetaTags(html: string, tags: string) {
   const withoutDefaults = html
     .replace(/<title>[\s\S]*?<\/title>\s*/i, "")
-    .replace(/<meta\s+name="description"[^>]*>\s*/i, "");
+    .replace(/<meta\s+name="description"[^>]*>\s*/i, "")
+    .replace(/<meta\s+(?:property="og:|name="twitter:)[^>]*>\s*/gi, "");
   return withoutDefaults.replace(/<\/head>/i, `  ${tags}\n  </head>`);
 }
 
