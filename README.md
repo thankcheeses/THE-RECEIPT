@@ -2,7 +2,7 @@
 
 > Put it on the record.
 
-THE RECEIPT is a social prediction game. You make a prediction about a future event, set how confident you are and when it should resolve, then lock it permanently. You get back a timestamped receipt. Later, you come back and record whether you were **RIGHT**, **WRONG**, **PARTIALLY RIGHT**, or **TOO EARLY**.
+THE RECEIPT is a social prediction app. You make a prediction about a future event, set how confident you are and when it should resolve, then lock it permanently. You get back a timestamped receipt. Later, you come back and record whether you were **RIGHT**, **WRONG**, **PARTIALLY RIGHT**, or **TOO EARLY**.
 
 Predictions cannot be edited after they are locked. That is the point — the original statement stays as evidence.
 
@@ -108,6 +108,7 @@ A receipt cannot be edited or deleted — not by its author, and not by an admin
 | `/dream` | Dream capture — microphone opens on arrival, always private |
 | `/privacy` | Privacy policy (draft) |
 | `/terms` | Terms (draft) |
+| `/analytics` | Admin-only event totals and retention |
 | `/moderation` | Admin-only report queue and takedown controls |
 | `/profile` | Authenticated profile and statistics |
 
@@ -191,12 +192,12 @@ Cards come in three shapes, requested with `?format=`:
 | Format | Size | Used for |
 | --- | --- | --- |
 | `og` (default) | 1200×630 | Link previews |
-| `story` | 1080×1920 | Instagram, TikTok and Snapchat stories |
+| `story` | 1080×1920 | Instagram and TikTok stories |
 | `square` | 1080×1080 | An Instagram feed post |
 
 The layout adapts rather than being cropped: the taller formats give the receipt a larger share of the canvas, set its contents bigger so a full phone screen does not leave it adrift, and add the tagline in the spare room. An unrecognised `format` is rejected rather than quietly served as a link card.
 
-**The GitHub Pages demo does not do this.** Pages serves static files with no server, so it cannot generate per-receipt tags. Its receipts also live in one browser's `localStorage` and are not reachable by anyone else, so there is nothing for a crawler to preview. The demo keeps the site's generic tags.
+**The GitHub Pages demo does not do this.** Pages serves static files with no server, so it cannot generate per-receipt tags. Its receipts also live in one browser's `localStorage` and are not reachable by anyone else, so there is nothing for a crawler to preview. The demo keeps the site-wide defaults from `client/index.html` — title, description, and Open Graph / Twitter title and description, with no preview image. On the Node app those same defaults are what every page other than a public receipt carries; `/r/:id` replaces them.
 
 ## GitHub Pages demo
 
@@ -256,4 +257,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
-MIT — see the `license` field in `package.json`.
+MIT. See [`LICENSE`](LICENSE).
+
+## Author
+
+Brianna Baynard · [LinkedIn](https://www.linkedin.com/in/brianna-baynard) · [GitHub](https://github.com/thankcheeses)

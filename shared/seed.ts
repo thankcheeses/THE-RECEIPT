@@ -70,7 +70,7 @@ export const DAILY_PROMPTS: Array<{ prompt: string; category: Category; resoluti
 ];
 
 export const DEMO_RECEIPTS = [
-  { id: "demo-4821", receiptNumber: "004821", username: "Brianna", prediction: "I’ll still be working here one year from today.", category: "LIFE" as Category, confidence: 80, status: "LOCKED" as ReceiptStatus, resolutionDate: "09/18/2027", createdAt: "09/18/2026" },
+  { id: "demo-4821", receiptNumber: "004821", username: "Brianna", prediction: "I’ll still be working here one year from today.", category: "LIFE" as Category, confidence: 80, status: "PENDING" as ReceiptStatus, resolutionDate: "09/18/2027", createdAt: "09/18/2026" },
   { id: "demo-4818", receiptNumber: "004818", username: "Marcus", prediction: "This tiny app will become the group chat’s new obsession.", category: "INTERNET" as Category, confidence: 65, status: "RIGHT" as ReceiptStatus, resolutionDate: "08/31/2026", createdAt: "08/01/2026" },
   { id: "demo-4814", receiptNumber: "004814", username: "Nia", prediction: "I will absolutely not buy another notebook this month.", category: "ABSURD" as Category, confidence: 95, status: "WRONG" as ReceiptStatus, resolutionDate: "09/01/2026", createdAt: "08/04/2026" },
 ];

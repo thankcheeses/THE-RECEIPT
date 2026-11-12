@@ -4,15 +4,15 @@ The deployment needs the following environment variables. Provide real values th
 
 | Variable | Purpose |
 | --- | --- |
-| `VITE_APP_ID` | Manus application identifier |
+| `VITE_APP_ID` | Application identifier registered with the OAuth provider |
 | `VITE_OAUTH_PORTAL_URL` | Browser OAuth portal URL |
 | `OAUTH_SERVER_URL` | OAuth server base URL |
 | `JWT_SECRET` | Session cookie signing secret |
 | `DATABASE_URL` | MySQL/TiDB connection string |
 | `OWNER_OPEN_ID` | Optional owner identity for admin role handling |
-| `BUILT_IN_FORGE_API_URL` | Optional server-side Manus built-in API base URL |
-| `BUILT_IN_FORGE_API_KEY` | Optional server-side Manus built-in API credential |
-| `VITE_ANALYTICS_ENDPOINT` | Optional analytics script endpoint |
+| `BUILT_IN_FORGE_API_URL` | Optional base URL of the hosting platform's services API (owner notifications, file storage) |
+| `BUILT_IN_FORGE_API_KEY` | Optional server-side credential for that services API |
+| `VITE_ANALYTICS_ENDPOINT` | Optional analytics script endpoint. The analytics tag is left out of the build unless this and `VITE_ANALYTICS_WEBSITE_ID` are both set |
 | `VITE_ANALYTICS_WEBSITE_ID` | Optional analytics site identifier |
 | `VITE_ABUSE_CONTACT` | Abuse and legal contact address, shown in the footer, on the report form, on a takedown notice and on the legal pages. Unset hides every one of them. **Required before public launch** — see below. |
 
