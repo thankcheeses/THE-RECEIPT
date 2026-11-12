@@ -2,7 +2,7 @@
 
 > Put it on the record.
 
-THE RECEIPT is a social prediction game. You make a prediction about a future event, set how confident you are and when it should resolve, then lock it permanently. You get back a timestamped receipt. Later, you come back and record whether you were **RIGHT**, **WRONG**, **PARTIALLY RIGHT**, or **TOO EARLY**.
+THE RECEIPT is a social prediction app. You make a prediction about a future event, set how confident you are and when it should resolve, then lock it permanently. You get back a timestamped receipt. Later, you come back and record whether you were **RIGHT**, **WRONG**, **PARTIALLY RIGHT**, or **TOO EARLY**.
 
 Predictions cannot be edited after they are locked. That is the point — the original statement stays as evidence.
 
@@ -108,6 +108,7 @@ A receipt cannot be edited or deleted — not by its author, and not by an admin
 | `/dream` | Dream capture — microphone opens on arrival, always private |
 | `/privacy` | Privacy policy (draft) |
 | `/terms` | Terms (draft) |
+| `/analytics` | Admin-only event totals and retention |
 | `/moderation` | Admin-only report queue and takedown controls |
 | `/profile` | Authenticated profile and statistics |
 
@@ -256,4 +257,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 
-MIT — see the `license` field in `package.json`.
+MIT. See [`LICENSE`](LICENSE).
+
+## Author
+
+Brianna Baynard · [LinkedIn](https://www.linkedin.com/in/brianna-baynard) · [GitHub](https://github.com/thankcheeses)
