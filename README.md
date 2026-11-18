@@ -203,7 +203,7 @@ The layout adapts rather than being cropped: the taller formats give the receipt
 
 The demo at https://thankcheeses.github.io/THE-RECEIPT/ is built and published by `.github/workflows/deploy-pages.yml` on every push to `main`.
 
-GitHub Pages serves static files only — no Express, no database. The static build therefore swaps the tRPC HTTP link for `client/src/lib/staticLink.ts`, which resolves every procedure in the browser against `client/src/lib/staticDemo.ts` using `localStorage`. Signing in creates a local demo account rather than running the real OAuth redirect, and data persists per browser instead of per account. Everything else — routes, layout, styling, the daily prompt rotation — is the same code as the server build.
+GitHub Pages serves static files only — no Express, no database. The static build therefore swaps the tRPC HTTP link for `client/src/lib/staticLink.ts`, which resolves every procedure in the browser against `client/src/lib/staticDemo.ts` using `localStorage`. Signing in creates a local demo account rather than running the real OAuth redirect, and data persists per browser instead of per account. A first visit is seeded with six made-up sample receipts (`client/src/lib/staticDemoSamples.ts`) so the public feed is not empty. They are written by an author named "Sample data (fictional)", printed as EXAMPLE RECEIPT, and exist only in the static build; the server build seeds nothing. Everything else — routes, layout, styling, the daily prompt rotation — is the same code as the server build.
 
 ```bash
 pnpm build:static   # writes dist/public with base path /THE-RECEIPT/

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The GitHub Pages demo no longer shows a first-time visitor an empty public feed. It seeds six made-up sample receipts, once per browser, written by an author named "Sample data (fictional)" and printed as EXAMPLE RECEIPT on the home page, the feed, Resolving Soon and the receipt page. Only the static build seeds them; the server build is unchanged. 5 tests.
 - The landing page no longer shows a hardcoded "NEXT RECEIPT 23:41:08" countdown. That panel now states when today's daily answer resolves, read from the daily challenge. The manifesto's "since today" attribution is gone, and the hero receipt is stamped as the receipt it previews would be: LOCKED for a daily answer, PENDING when there is no daily prompt. The first example receipt, a custom one, is stamped PENDING like every custom receipt.
 - Added a favicon and site-wide Open Graph / Twitter defaults to `client/index.html`. `injectMetaTags` now removes those defaults on `/r/:id` so a public receipt carries one set of tags, its own. 1 test.
 - Removed generator scaffolding nothing used: the example `Home` and `ComponentShowcase` pages, the `ManusDialog`, `AIChatBox`, `Map` and `DashboardLayout` components, the `__manus__` debug collector (which was being published with the Pages build) and its Vite plugins, `server/_core/{llm,map,heartbeat,dataApi}.ts`, the empty `.gitkeep`, and five dependencies only they used (`streamdown`, `@types/google.maps`, `add`, `@builder.io/vite-plugin-jsx-loc`, `vite-plugin-manus-runtime`). `ENVIRONMENT.md` describes its variables without naming a host.

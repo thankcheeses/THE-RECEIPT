@@ -24,8 +24,15 @@ import {
   type ReportStatus,
 } from "@shared/moderation";
 import { USERNAME_UNAVAILABLE, normalizeUsername } from "@shared/accountDeletion";
+import { FIRST_VISITOR_RECEIPT_ID, SAMPLE_AUTHOR, buildSampleReceipts, isSampleAuthor } from "./staticDemoSamples";
 
 export const IS_STATIC_DEMO = import.meta.env.VITE_STATIC_DEMO === "true";
+
+/**
+ * Whether a receipt is one of the demo's made-up samples. Always false outside
+ * the static demo, so the server build never labels a real receipt as sample.
+ */
+export const isSampleReceipt = (receipt: { userId?: number | null }) => IS_STATIC_DEMO && isSampleAuthor(receipt);
 
 const STORAGE_KEY = "the-receipt-static-demo";
 const AUTH_CHANGE_EVENT = "the-receipt:auth-change";
@@ -140,6 +147,8 @@ type DemoState = {
   moderationActions: DemoModerationAction[];
   /** Lower-cased handles of deleted accounts. Never reclaimable. */
   retiredUsernames: string[];
+  /** Set once the sample receipts have been added, so deleting or hiding one sticks. */
+  sampleReceiptsSeeded: boolean;
   nextReceiptId: number;
   nextChallengeId: number;
   nextNotificationId: number;
@@ -162,7 +171,8 @@ const emptyState = (): DemoState => ({
   reports: [],
   moderationActions: [],
   retiredUsernames: [],
-  nextReceiptId: 4822,
+  sampleReceiptsSeeded: false,
+  nextReceiptId: FIRST_VISITOR_RECEIPT_ID,
   nextChallengeId: 1,
   nextNotificationId: 1,
   nextReportId: 1,
@@ -193,6 +203,13 @@ const readState = (): DemoState => {
     loaded = raw ? { ...emptyState(), ...reviveDates(JSON.parse(raw)) } : emptyState();
   } catch {
     loaded = emptyState();
+  }
+  // A first visit would otherwise show an empty public feed. Add the labelled
+  // sample receipts once per browser; they then live in state like any other.
+  if (!loaded.sampleReceiptsSeeded) {
+    const existing = new Set(loaded.receipts.map((receipt) => receipt.id));
+    loaded.receipts.push(...buildSampleReceipts().filter((receipt) => !existing.has(receipt.id)));
+    loaded.sampleReceiptsSeeded = true;
   }
   cache = loaded;
   return loaded;
@@ -360,6 +377,13 @@ const syncDemoResolutionNotifications = (state: DemoState, user: DemoUser) => {
     });
   }
 };
+
+/**
+ * The public author of a receipt. The demo has one account plus the sample
+ * author, so a receipt is either the visitor's or a labelled sample.
+ */
+const authorOf = (state: DemoState, receipt: DemoReceipt) =>
+  isSampleAuthor(receipt) ? SAMPLE_AUTHOR : publicUser(state.user);
 
 /** The public, visible receipts written after `receiptId` ("ME TOO"). */
 const derivedReceipts = (state: DemoState, receiptId: number) =>
@@ -535,7 +559,7 @@ const handlers: Record<string, Handler> = {
       .filter(isPubliclyVisible)
       .sort((a, b) => b.id - a.id)
       .slice(0, 12)
-      .map((receipt) => ({ receipt, user: publicUser(state.user) }));
+      .map((receipt) => ({ receipt, user: authorOf(state, receipt) }));
   },
   "receipts.publicById": (input: { id: number }) => {
     const state = readState();
@@ -543,7 +567,7 @@ const handlers: Record<string, Handler> = {
     if (!receipt) throw new Error("That receipt is private or no longer exists.");
     // Redacted exactly as the server does, so the demo cannot show a field the
     // real build withholds.
-    return { receipt, user: publicUser(state.user) };
+    return { receipt, user: authorOf(state, receipt) };
   },
   "receipts.feed": (input?: { cursor?: number; category?: string; limit?: number }) => {
     const state = readState();
@@ -555,7 +579,7 @@ const handlers: Record<string, Handler> = {
       .sort((a, b) => b.id - a.id);
     const items = all.slice(0, limit);
     return {
-      items: items.map((receipt) => ({ receipt, user: publicUser(state.user) })),
+      items: items.map((receipt) => ({ receipt, user: authorOf(state, receipt) })),
       nextCursor: all.length > limit ? items[items.length - 1]?.id ?? null : null,
     };
   },
@@ -571,7 +595,7 @@ const handlers: Record<string, Handler> = {
       .filter((receipt) => new Date(receipt.resolutionDate!).getTime() >= now)
       .sort((a, b) => new Date(a.resolutionDate!).getTime() - new Date(b.resolutionDate!).getTime())
       .slice(0, limit)
-      .map((receipt) => ({ receipt, user: publicUser(state.user) }));
+      .map((receipt) => ({ receipt, user: authorOf(state, receipt) }));
   },
   "receipts.interactions": (input: { id: number }) => {
     const state = readState();
